@@ -1,0 +1,123 @@
+from importlib import reload
+import sys
+import os
+import torch
+import pdb
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+import loader
+import matplotlib as mpl
+reload(loader)
+
+new_model   = 1
+load_model  = 0
+train_model = 1
+save_model  = 0
+plot_models = 1
+
+
+if new_model:
+    import networks.net0029 as net
+    reload(net)
+    all_data = net.load_data()
+    model = net.thisnet()
+    model.idd = net.idd
+
+if load_model:
+    model.load_state_dict(torch.load("models/test%d.pth"%net.idd))
+
+if train_model:
+
+    t0 = time.time()
+
+    net.train(model,all_data)
+
+    if save_model:
+        oname = "models/test%d.pth"%model.idd
+        torch.save(model.state_dict(), oname)
+        print("model saved ",oname)
+
+    t1 = time.time() - t0
+    hrs = t1//3600
+    minute = (t1-hrs*3600)//60
+    sec = (t1 - hrs*3600-minute*60)#//60
+    total_time="%02d:%02d:%02d"%(hrs,minute,sec)
+
+
+if plot_models:
+    net.plot_loss_curve(model)
+    ds_train = net.SphericalDataset(all_data['train'])
+    ds_val   = net.SphericalDataset(all_data['valid'])
+    ds_tst   = net.SphericalDataset(all_data['test'])
+    print('ploot')
+    delta = []
+    err={'train':[],'valid':[],'test':[]}
+    subs = ['train','valid','test']
+    subs = ['train','valid']
+    fig1,ax=plt.subplots(1,3,figsize=(12,4))
+    for ns,subset in enumerate(subs):
+        mmin=20
+        mmax=-20
+        this_set = {'train':ds_train, 'valid':ds_val, 'test':ds_tst}[subset]
+        for n in range(len(this_set)):
+            if 1:
+                Tmode = this_set[n][0]
+                moo = model( Tmode.unsqueeze(0) )
+                EB = this_set[n][1]
+                err[subset].append( model.criterion(moo,EB.unsqueeze(0)))
+
+
+            #plot_multipole.rmplot( sky[subset][n], rm, clm_model = moo, clm_real = clm, fname = "rm_and_sampled_%04d"%n)
+            if 1:
+                import dtools_global.vis.pcolormesh_helper as pch
+                fig,axes=plt.subplots(2,3,figsize=(14,8))
+                ax0,ax1=axes
+                ppp = ax0[0].imshow(Tmode)
+                fig.colorbar(ppp,ax=ax0[0])
+                ax0[0].set(title='T')
+                Etarget = EB[0]
+                Btarget = EB[1]
+                Eguess=moo[0][0].detach().numpy()
+                Bguess=moo[0][1].detach().numpy()
+                Emin = min([Etarget.min(), Eguess.min()])
+                Emax = max([Etarget.max(), Eguess.max()])
+                Bmin = min([Btarget.min(), Bguess.min()])
+                Bmax = max([Btarget.max(), Bguess.max()])
+                Enorm = mpl.colors.Normalize(vmin=Emin,vmax=Emax)
+                Bnorm = mpl.colors.Normalize(vmin=Bmin,vmax=Bmax)
+                ppp=ax0[1].imshow(Etarget,norm=Enorm)
+                fig.colorbar(ppp,ax=ax0[1])
+                ax0[1].set(title='E actual')
+                ppp=ax0[2].imshow(Btarget,norm=Bnorm)
+                fig.colorbar(ppp,ax=ax0[2])
+                ax0[2].set(title='B actual')
+
+                ppp=ax1[1].imshow(Eguess,norm=Enorm)
+                fig.colorbar(ppp,ax=ax1[1])
+                ax1[1].set(title='E guess')
+                ppp=ax1[2].imshow(Bguess,norm=Bnorm)
+                ax1[2].set(title='B guess')
+                fig.colorbar(ppp,ax=ax1[2])
+
+                E1 = EB[0].detach().numpy().flatten()
+                E2 = moo[0][0].detach().numpy().flatten()
+                pch.simple_phase(E1,E2,ax=ax1[0])
+                mmin = E1.min()
+                mmax = E1.max()
+                ax1[0].plot( [mmin,mmax],[mmin,mmax],c='k')
+
+
+                fig.savefig('%s/plots/show_net%d_%s_%04d'%(os.environ['HOME'],model.idd,subset,n))
+
+
+
+        this_err = torch.tensor(err[subset]).detach().numpy()
+        ax[ns].hist(this_err)
+    fig1.tight_layout()
+    oname = '%s/plots/errhist_net%d'%(os.environ['HOME'],model.idd)
+    print(oname)
+    fig1.savefig(oname)
+    plt.close('all')
+
+
