@@ -22,7 +22,9 @@ from scipy.ndimage import gaussian_filter
 idd = 29
 what = "net 26, res net decoder blocks and batch norm"
 idd = 30
-what = "net 29, 1000 sets"
+what = "net 29, 1000 sets.  500 epoch"
+idd = 31
+what = "net 29, 2000 sets.  Bigger valid. 100 epochs."
 
 #fname = "clm_take3_L=4.h5"
 fname = 'p79d_subsets_S32_N5.h5'
@@ -30,10 +32,10 @@ fname = 'p79d_subsets_S128_N5.h5'
 #ntrain = 400
 #ntrain = 4
 #ntrain = 200
-ntrain = 1000
+ntrain = 2000
 #ntrain = 600
 #nvalid=3
-nvalid=4
+nvalid=10
 def load_data():
 
     all_data= loader.loader(fname,ntrain=ntrain, nvalid=nvalid)
@@ -52,7 +54,7 @@ def thisnet():
     return model
 
 def train(model,all_data):
-    epochs  = 500
+    epochs  = 100
     lr = 1e-3
     #lr = 1e-4
     batch_size=10 
