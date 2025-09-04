@@ -18,7 +18,7 @@ plot_models = 1
 
 
 if new_model:
-    import networks.net0040 as net
+    import networks.net0036 as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
@@ -47,9 +47,15 @@ if train_model:
 
 if plot_models:
     net.plot_loss_curve(model)
-    ds_train = net.SphericalDataset(all_data['train'])
-    ds_val   = net.SphericalDataset(all_data['valid'])
-    ds_tst   = net.SphericalDataset(all_data['test'])
+    if hasattr(net,'DatasetNorm'):
+        ds_train = net.DatasetNorm(all_data['train'], compute_stats=True)
+        ds_val   = net.DatasetNorm(all_data['valid'], mean_x=ds_train.mean_x, std_x=ds_train.std_x, mean_y=ds_train.mean_y, std_y=ds_train.std_y)
+        ds_tst   = net.DatasetNorm(all_data['test'], mean_x=ds_train.mean_x, std_x=ds_train.std_x, mean_y=ds_train.mean_y, std_y=ds_train.std_y)
+
+    else:
+        ds_train = net.SphericalDataset(all_data['train'])
+        ds_val   = net.SphericalDataset(all_data['valid'])
+        ds_tst   = net.SphericalDataset(all_data['test'])
     print('ploot')
     delta = []
     err={'train':[],'valid':[],'test':[]}
@@ -63,6 +69,8 @@ if plot_models:
         for n in range(len(this_set)):
             if 1:
                 Tmode = this_set[n][0]
+                if len(Tmode.shape) == 3:
+                    Tmode = Tmode.squeeze(0)
                 moo = model( Tmode.unsqueeze(0) )
                 EB = this_set[n][1]
                 err[subset].append( model.criterion(moo,EB.unsqueeze(0)))

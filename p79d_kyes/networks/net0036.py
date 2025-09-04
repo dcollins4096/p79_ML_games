@@ -25,13 +25,13 @@ what = "net34, normalize inputs"
 #fname = "clm_take3_L=4.h5"
 fname = 'p79d_subsets_S32_N5.h5'
 fname = 'p79d_subsets_S128_N5.h5'
-#ntrain = 400
-ntrain = 4
+ntrain = 400
+#ntrain = 10
 #ntrain = 2000
 #ntrain = 1000
 #ntrain = 600
 #nvalid=3
-nvalid=4
+nvalid=10
 def load_data():
 
     all_data= loader.loader(fname,ntrain=ntrain, nvalid=nvalid)
@@ -50,7 +50,7 @@ def thisnet():
     return model
 
 def train(model,all_data):
-    epochs  = 100
+    epochs  = 500
     lr = 1e-3
     #lr = 1e-4
     batch_size=10 
@@ -77,39 +77,46 @@ def downsample_avg(x, M):
 import torch
 from torch.utils.data import Dataset
 
-class SphericalDataset2(Dataset):
-    def __init__(self, X, mean=None, std=None, compute_stats=False):
-        self.all_data = downsample_avg(X,32)
-        self.X = self.all_data[:,0,:,:]
-        self.y = self.all_data[:,1:,:,:]
+class DatasetNorm(Dataset):
+    def __init__(self, X, mean_x=None, std_x=None,
+                       mean_y=None, std_y=None,
+                       compute_stats=False):
+        self.all_data = downsample_avg(X, 32)
+
+        # preserve channel dimensions
+        self.X = self.all_data[:, 0:1, :, :]   # [B, 1, H, W]
+        self.y = self.all_data[:, 1:, :, :]    # [B, C, H, W]
 
         if compute_stats:
-            # compute stats across all samples, flattening spatial dims but keeping channels
-            dims = list(range(self.y.ndim))
-            dims.remove(1)  # keep channel dim
-            self.mean = self.y.mean(dim=dims, keepdim=True)
-            self.std = self.y.std(dim=dims, keepdim=True, unbiased=False) + 1e-8
-        else:
-            assert mean is not None and std is not None, \
-                "Must pass mean/std if not computing stats."
-            self.mean, self.std = mean, std
+            # compute stats across training set
+            dims = list(range(self.X.ndim))
+            dims.remove(1)  # keep channel dimension
+            self.mean_x = self.X.mean(dim=dims, keepdim=True)
+            self.std_x  = self.X.std(dim=dims, keepdim=True, unbiased=False) + 1e-8
 
-        # normalize targets
-        self.y_norm = (self.y - self.mean) / self.std
+            self.mean_y = self.y.mean(dim=dims, keepdim=True)
+            self.std_y  = self.y.std(dim=dims, keepdim=True, unbiased=False) + 1e-8
+        else:
+            assert mean_x is not None and std_x is not None
+            assert mean_y is not None and std_y is not None
+            self.mean_x, self.std_x = mean_x, std_x
+            self.mean_y, self.std_y = mean_y, std_y
+
+        # normalize
+        self.X_norm = (self.X - self.mean_x) / self.std_x
+        self.y_norm = (self.y - self.mean_y) / self.std_y
 
     def __getitem__(self, idx):
-        return self.X[idx], self.y_norm[idx]
+        return self.X_norm[idx], self.y_norm[idx]
 
     def __len__(self):
         return len(self.X)
 
-    def unnormalize(self, y_norm):
-        """Undo normalization on predictions."""
-        return y_norm * self.std + self.mean
+    def unnormalize_y(self, y_norm):
+        return y_norm * self.std_y + self.mean_y
 
     def get_stats(self):
-        """Return (mean, std) so they can be reused for val/test sets."""
-        return self.mean, self.std
+        return self.mean_x, self.std_x, self.mean_y, self.std_y
 
 class SphericalDataset(Dataset):
     """
@@ -162,8 +169,8 @@ def trainer(
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     set_seed()
 
-    ds_train = SphericalDataset(all_data['train'])#, compute_stats=True)
-    ds_val   = SphericalDataset(all_data['valid'])#, mean=ds_train.mean, std=ds_train.std)
+    ds_train = DatasetNorm(all_data['train'], compute_stats=True)
+    ds_val   = DatasetNorm(all_data['valid'], mean_x=ds_train.mean_x, std_x=ds_train.std_x, mean_y=ds_train.mean_y, std_y=ds_train.std_y)
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader   = DataLoader(ds_val,   batch_size=max(64, batch_size), shuffle=False, drop_last=False)
 
