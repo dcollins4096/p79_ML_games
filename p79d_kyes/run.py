@@ -13,12 +13,12 @@ reload(loader)
 new_model   = 1
 load_model  = 0
 train_model = 1
-save_model  = 0
+save_model  = 1
 plot_models = 1
 
 
 if new_model:
-    import networks.net0029 as net
+    import networks.net0040 as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
@@ -69,7 +69,7 @@ if plot_models:
 
 
             #plot_multipole.rmplot( sky[subset][n], rm, clm_model = moo, clm_real = clm, fname = "rm_and_sampled_%04d"%n)
-            if 1:
+            if n<20:
                 import dtools_global.vis.pcolormesh_helper as pch
                 fig,axes=plt.subplots(2,3,figsize=(14,8))
                 ax0,ax1=axes
@@ -109,6 +109,7 @@ if plot_models:
 
 
                 fig.savefig('%s/plots/show_net%d_%s_%04d'%(os.environ['HOME'],model.idd,subset,n))
+                plt.close(fig)
 
 
 
