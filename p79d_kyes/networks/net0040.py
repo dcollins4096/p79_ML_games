@@ -31,7 +31,7 @@ ntrain = 2000
 #ntrain = 1000
 #ntrain = 600
 #nvalid=3
-nvalid=4
+nvalid=20
 downsample = True
 def load_data():
 
@@ -54,7 +54,7 @@ def train(model,all_data):
     epochs  = 500
     lr = 1e-3
     #lr = 1e-4
-    batch_size=10 
+    batch_size=20 
     lr_schedule=[100]
     trainer(model,all_data,epochs=epochs,lr=lr,batch_size=batch_size, weight_decay=0, lr_schedule=lr_schedule)
 
