@@ -21,18 +21,18 @@ from torch.utils.tensorboard import SummaryWriter
 
 
 
-idd = 45
-what = "visualization with tensorboard"
+idd = 46
+what = "visualization with tensorboard.  Tweak batch norm and activations"
 
 #fname = "clm_take3_L=4.h5"
 fname = 'p79d_subsets_S32_N5.h5'
 fname = 'p79d_subsets_S128_N5.h5'
 #ntrain = 400
 #ntrain = 500
-#ntrain = 2000
+ntrain = 2000
 #ntrain = 1000
 #ntrain = 600
-ntrain = 4
+#ntrain = 4
 #nvalid=3
 nvalid=10
 downsample = True
@@ -41,9 +41,25 @@ def load_data():
     all_data= loader.loader(fname,ntrain=ntrain, nvalid=nvalid)
     return all_data
 
+def init_weights(m):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        torch.nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, nn.Linear):
+        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+
+
+
 def thisnet():
 
+
     model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=False)
+
+    model.apply(init_weights)
+
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -314,14 +330,20 @@ def error_real_imag(guess,target):
     L1 += F.l1_loss(guess.imag, target.imag)
     return L1
 
-# ---------------- Residual SE Block ----------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
 class ResidualBlockSE(nn.Module):
     def __init__(self, in_channels, out_channels, reduction=16):
         super().__init__()
+        # Pre-activation BN + ReLU
+        self.bn1 = nn.BatchNorm2d(in_channels)
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+
         self.bn2 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
 
         # Skip connection if channel mismatch
         self.proj = None
@@ -335,8 +357,13 @@ class ResidualBlockSE(nn.Module):
 
     def forward(self, x):
         identity = x
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+
+        # Pre-activation residual block
+        out = F.relu(self.bn1(x))
+        out = self.conv1(out)
+
+        out = F.relu(self.bn2(out))
+        out = self.conv2(out)
 
         # SE attention
         w = self.global_pool(out).view(out.size(0), -1)
@@ -348,7 +375,9 @@ class ResidualBlockSE(nn.Module):
         if self.proj is not None:
             identity = self.proj(identity)
         out += identity
-        return F.relu(out)
+
+        return out
+
 
 # ---------------- Main Net ----------------
 class main_net(nn.Module):
@@ -382,7 +411,8 @@ class main_net(nn.Module):
         self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
 
     def forward(self, x):
-        if x.ndim == 3: x = x.unsqueeze(1)
+        if x.ndim == 3:
+            x = x.unsqueeze(1)
 
         # Encoder
         e1 = self.enc1(x)
@@ -396,8 +426,8 @@ class main_net(nn.Module):
             z = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial)).view(B, -1)
             z = F.relu(self.fc1(z))
             z = F.relu(self.fc2(z))
-            e4 = F.interpolate(z.view(B, C, self.fc_spatial, self.fc_spatial), size=(H, W),
-                               mode='bilinear', align_corners=False)
+            e4 = F.interpolate(z.view(B, C, self.fc_spatial, self.fc_spatial),
+                               size=(H, W), mode='bilinear', align_corners=False)
 
         # Decoder
         d4 = self.up4(e4)
@@ -414,6 +444,7 @@ class main_net(nn.Module):
 
         out = self.dec1(d2)
         return out
+
     def criterion(self, guess, target):
         return F.l1_loss(guess,target)
         #return hybrid_loss(guess,target,alpha=0.9)

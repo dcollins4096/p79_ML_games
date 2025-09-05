@@ -18,7 +18,7 @@ plot_models = 1
 
 
 if new_model:
-    import networks.net0036 as net
+    import networks.net0046 as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
