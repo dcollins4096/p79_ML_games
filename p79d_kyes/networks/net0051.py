@@ -19,10 +19,8 @@ import loader
 from scipy.ndimage import gaussian_filter
 from torch.utils.tensorboard import SummaryWriter
 
-
-
-idd = 50
-what = "49 with dropout 0.2, then 0.3, then weight decay 1e-3, bigger batch and valid sets"
+idd = 51
+what = "50.  Plus norm"
 
 #fname = "clm_take3_L=4.h5"
 fname = 'p79d_subsets_S32_N5.h5'
@@ -36,7 +34,7 @@ ntrain = 2000
 #nvalid=3
 nvalid=400
 downsample = True
-norm = False
+norm = True
 def load_data():
 
     all_data= loader.loader(fname,ntrain=ntrain, nvalid=nvalid)
@@ -99,7 +97,7 @@ def downsample_avg(x, M):
 import torch
 from torch.utils.data import Dataset
 
-class DatasetNormOff(Dataset):
+class DatasetNorm(Dataset):
     def __init__(self, X, mean_x=None, std_x=None,
                        mean_y=None, std_y=None,
                        compute_stats=False):
