@@ -19,8 +19,8 @@ import loader
 from scipy.ndimage import gaussian_filter
 from torch.utils.tensorboard import SummaryWriter
 
-idd = 54
-what = "52=50.  Plus TV and soft l1. 53=soft l1; 54=different schedule"
+idd = 55
+what = "More capacity"
 
 #fname = "clm_take3_L=4.h5"
 fname = 'p79d_subsets_S32_N5.h5'
@@ -55,7 +55,7 @@ def init_weights(m):
 def thisnet():
 
 
-    model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=False)
+    model = main_net(base_channels=128, fc_spatial=16, use_fc_bottleneck=False)
 
     model.apply(init_weights)
 
