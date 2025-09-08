@@ -17,10 +17,12 @@ import torch.optim as optim
 import pdb
 import loader
 from scipy.ndimage import gaussian_filter
+from torch.utils.tensorboard import SummaryWriter
+import augmenter
 
 
-idd = 41
-what = "Learned upsampling, hybrid loss"
+idd = 57
+what = "Augmentation take 2"
 
 #fname = "clm_take3_L=4.h5"
 fname = 'p79d_subsets_S32_N5.h5'
@@ -28,10 +30,9 @@ fname = 'p79d_subsets_S128_N5.h5'
 #ntrain = 400
 #ntrain = 500
 #ntrain = 2000
-#ntrain = 1000
+ntrain = 10
 #ntrain = 600
 #nvalid=3
-ntrain = 10
 nvalid=10
 downsample = True
 def load_data():
@@ -41,7 +42,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=True)
+    model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=False)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -87,7 +88,7 @@ class SphericalDataset(Dataset):
 
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
-        return self.all_data[idx][0], self.all_data[idx][1:]
+        return self.all_data[idx][0:1], self.all_data[idx][1:]
 
 # ---------------------------
 # Utils
@@ -151,6 +152,7 @@ def trainer(
         for xb, yb in train_loader:
             xb = xb.to(device)
             yb = yb.to(device)
+            xb,yb=augmenter.aug(xb,yb)
 
             optimizer.zero_grad(set_to_none=True)
             if verbose:

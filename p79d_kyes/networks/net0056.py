@@ -17,10 +17,11 @@ import torch.optim as optim
 import pdb
 import loader
 from scipy.ndimage import gaussian_filter
+from torch.utils.tensorboard import SummaryWriter
+import augmenter
 
-
-idd = 41
-what = "Learned upsampling, hybrid loss"
+idd = 56
+what = "augmenter"
 
 #fname = "clm_take3_L=4.h5"
 fname = 'p79d_subsets_S32_N5.h5'
@@ -30,25 +31,45 @@ fname = 'p79d_subsets_S128_N5.h5'
 #ntrain = 2000
 #ntrain = 1000
 #ntrain = 600
+#ntrain = 4
 #nvalid=3
+#nvalid=400
 ntrain = 10
-nvalid=10
+nvalid = 10
 downsample = True
+norm = False
 def load_data():
 
     all_data= loader.loader(fname,ntrain=ntrain, nvalid=nvalid)
     return all_data
 
+def init_weights(m):
+    if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        torch.nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+    elif isinstance(m, nn.Linear):
+        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.zeros_(m.bias)
+
+
+
 def thisnet():
 
-    model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=True)
+
+    model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=False)
+
+    model.apply(init_weights)
+
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
-    for m in model.modules():
-        if isinstance(m, nn.Linear):
-            nn.init.xavier_uniform_(m.weight)
-            nn.init.zeros_(m.bias)
+    if 0:
+        for m in model.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
     return model
 
 def train(model,all_data):
@@ -76,6 +97,53 @@ def downsample_avg(x, M):
 # ---------------------------
 # Dataset with input normalization
 # ---------------------------
+import torch
+from torch.utils.data import Dataset
+
+class DatasetNormOff(Dataset):
+    def __init__(self, X, mean_x=None, std_x=None,
+                       mean_y=None, std_y=None,
+                       compute_stats=False):
+        if downsample:
+            self.all_data=downsample_avg(X,32)
+        else:
+            self.all_data=X
+
+        # preserve channel dimensions
+        self.X = self.all_data[:, 0:1, :, :]   # [B, 1, H, W]
+        self.y = self.all_data[:, 1:, :, :]    # [B, C, H, W]
+
+        if compute_stats:
+            # compute stats across training set
+            dims = list(range(self.X.ndim))
+            dims.remove(1)  # keep channel dimension
+            self.mean_x = self.X.mean(dim=dims, keepdim=True)
+            self.std_x  = self.X.std(dim=dims, keepdim=True, unbiased=False) + 1e-8
+
+            self.mean_y = self.y.mean(dim=dims, keepdim=True)
+            self.std_y  = self.y.std(dim=dims, keepdim=True, unbiased=False) + 1e-8
+        else:
+            assert mean_x is not None and std_x is not None
+            assert mean_y is not None and std_y is not None
+            self.mean_x, self.std_x = mean_x, std_x
+            self.mean_y, self.std_y = mean_y, std_y
+
+        # normalize
+        self.X_norm = (self.X - self.mean_x) / self.std_x
+        self.y_norm = (self.y - self.mean_y) / self.std_y
+
+    def __getitem__(self, idx):
+        return self.X_norm[idx], self.y_norm[idx]
+
+    def __len__(self):
+        return len(self.X)
+
+    def unnormalize_y(self, y_norm):
+        return y_norm * self.std_y + self.mean_y
+
+    def get_stats(self):
+        return self.mean_x, self.std_x, self.mean_y, self.std_y
+
 class SphericalDataset(Dataset):
     def __init__(self, all_data):
         if downsample:
@@ -87,7 +155,7 @@ class SphericalDataset(Dataset):
 
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
-        return self.all_data[idx][0], self.all_data[idx][1:]
+        return self.all_data[idx][0:1], self.all_data[idx][1:]
 
 # ---------------------------
 # Utils
@@ -118,12 +186,18 @@ def trainer(
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     set_seed()
 
-    ds_train = SphericalDataset(all_data['train'])
-    ds_val   = SphericalDataset(all_data['valid'])
+    if norm:
+        ds_train = DatasetNorm(all_data['train'], compute_stats=True)
+        ds_val   = DatasetNorm(all_data['valid'], mean_x=ds_train.mean_x, std_x=ds_train.std_x, mean_y=ds_train.mean_y, std_y=ds_train.std_y)
+    else:
+        ds_train = SphericalDataset(all_data['train'])
+        ds_val   = SphericalDataset(all_data['valid'])
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader   = DataLoader(ds_val,   batch_size=max(64, batch_size), shuffle=False, drop_last=False)
 
     model = model.to(device)
+
+    writer = SummaryWriter(log_dir="board/run_net%d/net_experiment"%idd)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * max(1, len(train_loader))
@@ -131,7 +205,7 @@ def trainer(
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
-        gamma=0.1             # multiply by gamma each time
+        gamma=0.5             # multiply by gamma each time
     )
 
     best_val = float("inf")
@@ -148,9 +222,10 @@ def trainer(
         if verbose:
             print("Epoch %d"%epoch)
         running = 0.0
-        for xb, yb in train_loader:
+        for step, (xb, yb) in enumerate(train_loader):
             xb = xb.to(device)
             yb = yb.to(device)
+            xb,yb=augmenter.aug(xb,yb)
 
             optimizer.zero_grad(set_to_none=True)
             if verbose:
@@ -164,6 +239,8 @@ def trainer(
             if verbose:
                 print("  scale backward")
             loss.backward()
+            global_step = epoch * len(train_loader) + step
+            writer.add_scalar("Loss/train", loss.item(), global_step)
 
             if verbose:
                 print("  steps")
@@ -229,6 +306,13 @@ def trainer(
             print(f"Early stopping at epoch {epoch}. Best val {best_val:.4f}.")
             print('disabled')
             #break
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                writer.add_histogram(f"Weights/{name}", param.data.cpu().numpy(), epoch)
+                if param.grad is not None:
+                    writer.add_histogram(f"Grads/{name}", param.grad.cpu().numpy(), epoch)
+
+        
 
     return model
     # restore best
@@ -253,14 +337,26 @@ def error_real_imag(guess,target):
     L1 += F.l1_loss(guess.imag, target.imag)
     return L1
 
-# ---------------- Residual SE Block ----------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class ResidualBlockSE(nn.Module):
-    def __init__(self, in_channels, out_channels, reduction=16):
+    def __init__(self, in_channels, out_channels, reduction=16, dropout=0.3):
         super().__init__()
+        self.dropout = dropout
+
+        # Pre-activation BN + conv
+        self.bn1 = nn.BatchNorm2d(in_channels)
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+
         self.bn2 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
 
         # Skip connection if channel mismatch
         self.proj = None
@@ -274,12 +370,21 @@ class ResidualBlockSE(nn.Module):
 
     def forward(self, x):
         identity = x
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+
+        # Pre-activation residual block
+        out = F.relu(self.bn1(x))
+        out = self.conv1(out)
+        out = F.dropout2d(out, p=self.dropout, training=self.training)
+
+        out = F.relu(self.bn2(out))
+        out = self.conv2(out)
+        # Optional second dropout
+        # out = F.dropout2d(out, p=self.dropout, training=self.training)
 
         # SE attention
         w = self.global_pool(out).view(out.size(0), -1)
         w = F.relu(self.fc1(w))
+        w = F.dropout(w, p=self.dropout, training=self.training)  # channel dropout in SE
         w = torch.sigmoid(self.fc2(w)).view(out.size(0), out.size(1), 1, 1)
         out = out * w
 
@@ -287,20 +392,22 @@ class ResidualBlockSE(nn.Module):
         if self.proj is not None:
             identity = self.proj(identity)
         out += identity
-        return F.relu(out)
+
+        return out
 
 # ---------------- Main Net ----------------
 class main_net(nn.Module):
     def __init__(self, in_channels=1, out_channels=2, base_channels=32,
-                 use_fc_bottleneck=False, fc_hidden=512, fc_spatial=4):
+                 use_fc_bottleneck=False, fc_hidden=512, fc_spatial=4, dropout=0.1):
         super().__init__()
         self.use_fc_bottleneck = use_fc_bottleneck
+        self.dropout = dropout
 
         # Encoder
-        self.enc1 = ResidualBlockSE(in_channels, base_channels)
-        self.enc2 = ResidualBlockSE(base_channels, base_channels*2)
-        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4)
-        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8)
+        self.enc1 = ResidualBlockSE(in_channels, base_channels, dropout=dropout)
+        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, dropout=dropout)
+        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, dropout=dropout)
+        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, dropout=dropout)
         self.pool = nn.MaxPool2d(2)
 
         # Optional FC bottleneck
@@ -314,10 +421,10 @@ class main_net(nn.Module):
         self.up3 = nn.ConvTranspose2d(base_channels*4, base_channels*4, kernel_size=2, stride=2)
         self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=2, stride=2)
 
-        # Decoder with skip connections
-        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4)
-        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2)
-        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels)
+        # Decoder with skip connections (no dropout here)
+        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, dropout=0.0)
+        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, dropout=0.0)
+        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, dropout=0.0)
         self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
 
     def forward(self, x):
@@ -334,9 +441,11 @@ class main_net(nn.Module):
             B, C, H, W = e4.shape
             z = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial)).view(B, -1)
             z = F.relu(self.fc1(z))
+            z = F.dropout(z, p=self.dropout, training=self.training)
             z = F.relu(self.fc2(z))
-            e4 = F.interpolate(z.view(B, C, self.fc_spatial, self.fc_spatial), size=(H, W),
-                               mode='bilinear', align_corners=False)
+            z = F.dropout(z, p=self.dropout, training=self.training)
+            e4 = F.interpolate(z.view(B, C, self.fc_spatial, self.fc_spatial),
+                               size=(H, W), mode='bilinear', align_corners=False)
 
         # Decoder
         d4 = self.up4(e4)
@@ -353,21 +462,17 @@ class main_net(nn.Module):
 
         out = self.dec1(d2)
         return out
+
+
     def criterion(self, guess, target):
-        return F.l1_loss(guess,target)
-        #return hybrid_loss(guess,target,alpha=0.9)
+            huber = F.smooth_l1_loss(guess, target, beta=0.01)
+            return huber #+ tv_loss(guess, w=1e-4)
+    #def criterion(self, guess, target):
+    #    #return F.l1_loss(guess, target)
 
-# ---------------- Loss Functions ----------------
-def fft_loss(pred, target):
-    pred_fft = torch.fft.fft2(pred, norm="ortho")
-    target_fft = torch.fft.fft2(target, norm="ortho")
-    return torch.mean(torch.abs(torch.abs(pred_fft) - torch.abs(target_fft)))
-
-def hybrid_loss(pred, target, alpha=0.5):
-    """
-    alpha: weight for Fourier loss
-    """
-    pixel_loss = F.l1_loss(pred, target)
-    spectral_loss = fft_loss(pred, target)
-    return (1-alpha)*pixel_loss + alpha*spectral_loss
+def tv_loss(img, w=1e-4):
+    # img: [B, C, H, W]
+    dx = img[..., 1:, :] - img[..., :-1, :]
+    dy = img[..., :, 1:] - img[..., :, :-1]
+    return w*(dx.abs().mean() + dy.abs().mean())
 
