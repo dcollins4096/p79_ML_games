@@ -18,7 +18,7 @@ plot_models = 1
 
 
 if new_model:
-    import networks.net0046 as net
+    import networks.net0063 as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
@@ -85,27 +85,28 @@ if plot_models:
                 fig.colorbar(ppp,ax=ax0[0])
                 ax0[0].set(title='T')
                 Etarget = EB[0]
-                Btarget = EB[1]
                 Eguess=moo[0][0].detach().numpy()
-                Bguess=moo[0][1].detach().numpy()
                 Emin = min([Etarget.min(), Eguess.min()])
                 Emax = max([Etarget.max(), Eguess.max()])
-                Bmin = min([Btarget.min(), Bguess.min()])
-                Bmax = max([Btarget.max(), Bguess.max()])
                 Enorm = mpl.colors.Normalize(vmin=Emin,vmax=Emax)
-                Bnorm = mpl.colors.Normalize(vmin=Bmin,vmax=Bmax)
                 ppp=ax0[1].imshow(Etarget,norm=Enorm)
                 fig.colorbar(ppp,ax=ax0[1])
                 ax0[1].set(title='E actual')
-                ppp=ax0[2].imshow(Btarget,norm=Bnorm)
-                fig.colorbar(ppp,ax=ax0[2])
                 ax0[2].set(title='B actual')
 
                 ppp=ax1[1].imshow(Eguess,norm=Enorm)
                 fig.colorbar(ppp,ax=ax1[1])
                 ax1[1].set(title='E guess')
-                ppp=ax1[2].imshow(Bguess,norm=Bnorm)
-                ax1[2].set(title='B guess')
+                if moo.shape[1]>1:
+                    Btarget = EB[1]
+                    Bguess=moo[0][1].detach().numpy()
+                    Bmin = min([Btarget.min(), Bguess.min()])
+                    Bmax = max([Btarget.max(), Bguess.max()])
+                    Bnorm = mpl.colors.Normalize(vmin=Bmin,vmax=Bmax)
+                    ppp=ax0[2].imshow(Btarget,norm=Bnorm)
+                    fig.colorbar(ppp,ax=ax0[2])
+                    ppp=ax1[2].imshow(Bguess,norm=Bnorm)
+                    ax1[2].set(title='B guess')
                 fig.colorbar(ppp,ax=ax1[2])
 
                 E1 = EB[0].detach().numpy().flatten()
