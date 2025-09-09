@@ -19,21 +19,22 @@ import loader
 from scipy.ndimage import gaussian_filter
 
 
-idd = 62
-what = "41 but only E"
+idd = 63
+what = "41 but only E.  Now try it with the big set"
 
 #fname = "clm_take3_L=4.h5"
 fname = 'p79d_subsets_S32_N5.h5'
 fname = 'p79d_subsets_S128_N5.h5'
+fname = "p79d_subsets_S512_N2_xyz.h5"
 #ntrain = 400
-#ntrain = 500
+ntrain = 500
 #ntrain = 2000
 #ntrain = 1000
 #ntrain = 600
 #nvalid=3
-ntrain = 10
+#ntrain = 10
 nvalid=10
-downsample = True
+downsample = 32
 def load_data():
 
     all_data= loader.loader(fname,ntrain=ntrain, nvalid=nvalid)
@@ -79,7 +80,7 @@ def downsample_avg(x, M):
 class SphericalDataset(Dataset):
     def __init__(self, all_data):
         if downsample:
-            self.all_data=downsample_avg(all_data,32)
+            self.all_data=downsample_avg(all_data,downsample)
         else:
             self.all_data=all_data
     def __len__(self):

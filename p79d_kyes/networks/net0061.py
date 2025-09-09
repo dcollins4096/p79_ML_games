@@ -17,31 +17,42 @@ import torch.optim as optim
 import pdb
 import loader
 from scipy.ndimage import gaussian_filter
+from torch.utils.tensorboard import SummaryWriter
+import augmenter
 
 
-idd = 62
-what = "41 but only E"
+idd = 61
+what = "Only get E, use the full data"
 
 #fname = "clm_take3_L=4.h5"
 fname = 'p79d_subsets_S32_N5.h5'
-fname = 'p79d_subsets_S128_N5.h5'
+#fname = 'p79d_subsets_S128_N5.h5'
+#fname = 'p79d_subsets_S256_N5.h5'
+#fname = 'p79d_subsets_S256_N5_xyz.h5'
+#fname = 'p79d_subsets_S512_N2_xyz.h5'
 #ntrain = 400
-#ntrain = 500
+ntrain = 10
 #ntrain = 2000
-#ntrain = 1000
+#ntrain = 4000
+#ntrain = 10
 #ntrain = 600
 #nvalid=3
-ntrain = 10
 nvalid=10
-downsample = True
+downsample = False
+augment = False
+epochs  = 500
+#lr = 1e-3
+lr = 1e-4
+batch_size=128
+lr_schedule=[800]
 def load_data():
 
-    all_data= loader.loader(fname,ntrain=ntrain, nvalid=nvalid)
+    all_data= loader.loader(fname,ntrain=ntrain, nvalid=nvalid, r_range=None)
     return all_data
 
 def thisnet():
 
-    model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=True)
+    model = main_net(base_channels=16, fc_spatial=4, use_fc_bottleneck=False)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -52,11 +63,6 @@ def thisnet():
     return model
 
 def train(model,all_data):
-    epochs  = 500
-    lr = 1e-3
-    #lr = 1e-4
-    batch_size=10 
-    lr_schedule=[100]
     trainer(model,all_data,epochs=epochs,lr=lr,batch_size=batch_size, weight_decay=0, lr_schedule=lr_schedule)
 
 import torch
@@ -79,7 +85,7 @@ def downsample_avg(x, M):
 class SphericalDataset(Dataset):
     def __init__(self, all_data):
         if downsample:
-            self.all_data=downsample_avg(all_data,32)
+            self.all_data=downsample_avg(all_data,downsample)
         else:
             self.all_data=all_data
     def __len__(self):
@@ -87,7 +93,7 @@ class SphericalDataset(Dataset):
 
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
-        return self.all_data[idx][0], self.all_data[idx][1:]
+        return self.all_data[idx][0:1], self.all_data[idx][1:]
 
 # ---------------------------
 # Utils
@@ -151,6 +157,8 @@ def trainer(
         for xb, yb in train_loader:
             xb = xb.to(device)
             yb = yb.to(device)
+            if augment:
+                xb,yb=augmenter.aug(xb,yb)
 
             optimizer.zero_grad(set_to_none=True)
             if verbose:
@@ -291,7 +299,7 @@ class ResidualBlockSE(nn.Module):
 
 # ---------------- Main Net ----------------
 class main_net(nn.Module):
-    def __init__(self, in_channels=1, out_channels=1, base_channels=32,
+    def __init__(self, in_channels=1, out_channels=2, base_channels=32,
                  use_fc_bottleneck=False, fc_hidden=512, fc_spatial=4):
         super().__init__()
         self.use_fc_bottleneck = use_fc_bottleneck
@@ -354,7 +362,7 @@ class main_net(nn.Module):
         out = self.dec1(d2)
         return out
     def criterion(self, guess, target):
-        return F.l1_loss(guess,target[:,0:1,:,:])
+        return F.l1_loss(guess,target[:,1:,:,:])
         #return hybrid_loss(guess,target,alpha=0.9)
 
 # ---------------- Loss Functions ----------------
