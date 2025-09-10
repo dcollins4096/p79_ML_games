@@ -18,11 +18,12 @@ plot_models = 1
 
 
 if new_model:
-    import networks.net0063 as net
+    import networks.net0065 as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
     model.idd = net.idd
+
 
 if load_model:
     model.load_state_dict(torch.load("models/test%d.pth"%net.idd))
@@ -31,6 +32,7 @@ if train_model:
 
     t0 = time.time()
 
+    #import networks.net0064 as othernet
     net.train(model,all_data)
 
     if save_model:
@@ -46,7 +48,10 @@ if train_model:
 
 
 if plot_models:
-    net.plot_loss_curve(model)
+    if hasattr(model,'train_curve'):
+        net.plot_loss_curve(model)
+    else:
+        print('didnt save train curve')
     if hasattr(net,'DatasetNorm'):
         ds_train = net.DatasetNorm(all_data['train'], compute_stats=True)
         ds_val   = net.DatasetNorm(all_data['valid'], mean_x=ds_train.mean_x, std_x=ds_train.std_x, mean_y=ds_train.mean_y, std_y=ds_train.std_y)
@@ -66,63 +71,64 @@ if plot_models:
         mmin=20
         mmax=-20
         this_set = {'train':ds_train, 'valid':ds_val, 'test':ds_tst}[subset]
-        for n in range(len(this_set)):
-            if 1:
-                Tmode = this_set[n][0]
-                if len(Tmode.shape) == 3:
-                    Tmode = Tmode.squeeze(0)
-                moo = model( Tmode.unsqueeze(0) )
-                EB = this_set[n][1]
-                err[subset].append( model.criterion(moo,EB.unsqueeze(0)))
+        with torch.no_grad():
+            for n in range(len(this_set)):
+                if 1:
+                    Tmode = this_set[n][0]
+                    if len(Tmode.shape) == 3:
+                        Tmode = Tmode.squeeze(0)
+                    moo = model( Tmode.unsqueeze(0).to(net.device))
+                    EB = this_set[n][1]
+                    err[subset].append( model.criterion(moo,EB.unsqueeze(0).to(net.device)))
+                    moo = moo.cpu()
+                #plot_multipole.rmplot( sky[subset][n], rm, clm_model = moo, clm_real = clm, fname = "rm_and_sampled_%04d"%n)
+                if n<20:
+                    import dtools_global.vis.pcolormesh_helper as pch
+                    fig,axes=plt.subplots(2,3,figsize=(14,8))
+                    ax0,ax1=axes
+                    ppp = ax0[0].imshow(Tmode)
+                    fig.colorbar(ppp,ax=ax0[0])
+                    ax0[0].set(title='T')
+                    Etarget = EB[0]
+                    Eguess=moo[0][0].detach().numpy()
+                    Emin = min([Etarget.min(), Eguess.min()])
+                    Emax = max([Etarget.max(), Eguess.max()])
+                    Enorm = mpl.colors.Normalize(vmin=Emin,vmax=Emax)
+                    ppp=ax0[1].imshow(Etarget,norm=Enorm)
+                    fig.colorbar(ppp,ax=ax0[1])
+                    ax0[1].set(title='E actual')
+                    ax0[2].set(title='B actual')
+
+                    ppp=ax1[1].imshow(Eguess,norm=Enorm)
+                    fig.colorbar(ppp,ax=ax1[1])
+                    ax1[1].set(title='E guess')
+                    if moo.shape[1]>1:
+                        Btarget = EB[1]
+                        Bguess=moo[0][1].detach().numpy()
+                        Bmin = min([Btarget.min(), Bguess.min()])
+                        Bmax = max([Btarget.max(), Bguess.max()])
+                        Bnorm = mpl.colors.Normalize(vmin=Bmin,vmax=Bmax)
+                        ppp=ax0[2].imshow(Btarget,norm=Bnorm)
+                        fig.colorbar(ppp,ax=ax0[2])
+                        ppp=ax1[2].imshow(Bguess,norm=Bnorm)
+                        ax1[2].set(title='B guess')
+                    fig.colorbar(ppp,ax=ax1[2])
+
+                    E1 = EB[0].detach().numpy().flatten()
+                    E2 = moo[0][0].detach().numpy().flatten()
+                    pch.simple_phase(E1,E2,ax=ax1[0])
+                    mmin = E1.min()
+                    mmax = E1.max()
+                    ax1[0].plot( [mmin,mmax],[mmin,mmax],c='k')
 
 
-            #plot_multipole.rmplot( sky[subset][n], rm, clm_model = moo, clm_real = clm, fname = "rm_and_sampled_%04d"%n)
-            if n<20:
-                import dtools_global.vis.pcolormesh_helper as pch
-                fig,axes=plt.subplots(2,3,figsize=(14,8))
-                ax0,ax1=axes
-                ppp = ax0[0].imshow(Tmode)
-                fig.colorbar(ppp,ax=ax0[0])
-                ax0[0].set(title='T')
-                Etarget = EB[0]
-                Eguess=moo[0][0].detach().numpy()
-                Emin = min([Etarget.min(), Eguess.min()])
-                Emax = max([Etarget.max(), Eguess.max()])
-                Enorm = mpl.colors.Normalize(vmin=Emin,vmax=Emax)
-                ppp=ax0[1].imshow(Etarget,norm=Enorm)
-                fig.colorbar(ppp,ax=ax0[1])
-                ax0[1].set(title='E actual')
-                ax0[2].set(title='B actual')
-
-                ppp=ax1[1].imshow(Eguess,norm=Enorm)
-                fig.colorbar(ppp,ax=ax1[1])
-                ax1[1].set(title='E guess')
-                if moo.shape[1]>1:
-                    Btarget = EB[1]
-                    Bguess=moo[0][1].detach().numpy()
-                    Bmin = min([Btarget.min(), Bguess.min()])
-                    Bmax = max([Btarget.max(), Bguess.max()])
-                    Bnorm = mpl.colors.Normalize(vmin=Bmin,vmax=Bmax)
-                    ppp=ax0[2].imshow(Btarget,norm=Bnorm)
-                    fig.colorbar(ppp,ax=ax0[2])
-                    ppp=ax1[2].imshow(Bguess,norm=Bnorm)
-                    ax1[2].set(title='B guess')
-                fig.colorbar(ppp,ax=ax1[2])
-
-                E1 = EB[0].detach().numpy().flatten()
-                E2 = moo[0][0].detach().numpy().flatten()
-                pch.simple_phase(E1,E2,ax=ax1[0])
-                mmin = E1.min()
-                mmax = E1.max()
-                ax1[0].plot( [mmin,mmax],[mmin,mmax],c='k')
-
-
-                fig.savefig('%s/plots/show_net%d_%s_%04d'%(os.environ['HOME'],model.idd,subset,n))
-                plt.close(fig)
+                    fig.savefig('%s/plots/show_net%d_%s_%04d'%(os.environ['HOME'],model.idd,subset,n))
+                    plt.close(fig)
 
 
 
-        this_err = torch.tensor(err[subset]).detach().numpy()
+        errs = [e.detach() for e in err[subset]]
+        #this_err = torch.tensor(err[subset]).detach().numpy()
         ax[ns].hist(this_err)
     fig1.tight_layout()
     oname = '%s/plots/errhist_net%d'%(os.environ['HOME'],model.idd)
