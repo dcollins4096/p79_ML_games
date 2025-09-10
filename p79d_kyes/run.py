@@ -18,7 +18,7 @@ plot_models = 1
 
 
 if new_model:
-    import networks.net0065 as net
+    import networks.net0068 as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
@@ -81,8 +81,20 @@ if plot_models:
                     EB = this_set[n][1]
                     err[subset].append( model.criterion(moo,EB.unsqueeze(0).to(net.device)))
                     moo = moo.cpu()
+            errs = np.array([e.item() for e in err[subset]])
+            args = np.argsort(errs)
+            dothese = np.concatenate([args[:10],args[-10:]])
+            print(errs[dothese])
+            for i,n in enumerate(dothese):
+                Tmode = this_set[n][0]
+                if len(Tmode.shape) == 3:
+                    Tmode = Tmode.squeeze(0)
+                moo = model( Tmode.unsqueeze(0).to(net.device))
+                moo = moo.cpu()
+                EB = this_set[n][1]
+                thiserr = errs[n]
                 #plot_multipole.rmplot( sky[subset][n], rm, clm_model = moo, clm_real = clm, fname = "rm_and_sampled_%04d"%n)
-                if n<20:
+                if 1:
                     import dtools_global.vis.pcolormesh_helper as pch
                     fig,axes=plt.subplots(2,3,figsize=(14,8))
                     ax0,ax1=axes
@@ -116,20 +128,20 @@ if plot_models:
 
                     E1 = EB[0].detach().numpy().flatten()
                     E2 = moo[0][0].detach().numpy().flatten()
+                    ax1[0].set(title='%0.4f'%thiserr)
                     pch.simple_phase(E1,E2,ax=ax1[0])
                     mmin = E1.min()
                     mmax = E1.max()
                     ax1[0].plot( [mmin,mmax],[mmin,mmax],c='k')
 
 
-                    fig.savefig('%s/plots/show_net%d_%s_%04d'%(os.environ['HOME'],model.idd,subset,n))
+                    fig.savefig('%s/plots/show_net%d_%s_%04d'%(os.environ['HOME'],model.idd,subset,i))
                     plt.close(fig)
 
 
 
-        errs = [e.detach() for e in err[subset]]
         #this_err = torch.tensor(err[subset]).detach().numpy()
-        ax[ns].hist(this_err)
+        ax[ns].hist(errs)
     fig1.tight_layout()
     oname = '%s/plots/errhist_net%d'%(os.environ['HOME'],model.idd)
     print(oname)
