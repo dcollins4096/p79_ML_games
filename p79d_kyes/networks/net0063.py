@@ -26,18 +26,29 @@ what = "41 but only E.  Now try it with the big set"
 fname = 'p79d_subsets_S32_N5.h5'
 fname = 'p79d_subsets_S128_N5.h5'
 fname = "p79d_subsets_S512_N2_xyz.h5"
+fname = "p79d_subsets_S512_N2_xyz_down_32.h5"
 #ntrain = 400
-ntrain = 500
-#ntrain = 2000
+#ntrain = 500
+ntrain = 3000
 #ntrain = 1000
 #ntrain = 600
 #nvalid=3
 #ntrain = 10
 nvalid=10
 downsample = 32
+#device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+device = "cuda" if torch.cuda.is_available() else "cpu"
+epochs  = 300
+lr = 1e-3
+#lr = 1e-4
+batch_size=10 
+lr_schedule=[100]
+weight_decay = 1e-3
 def load_data():
 
+    print('read the data')
     all_data= loader.loader(fname,ntrain=ntrain, nvalid=nvalid)
+    print('done')
     return all_data
 
 def thisnet():
@@ -53,12 +64,7 @@ def thisnet():
     return model
 
 def train(model,all_data):
-    epochs  = 500
-    lr = 1e-3
-    #lr = 1e-4
-    batch_size=10 
-    lr_schedule=[100]
-    trainer(model,all_data,epochs=epochs,lr=lr,batch_size=batch_size, weight_decay=0, lr_schedule=lr_schedule)
+    trainer(model,all_data,epochs=epochs,lr=lr,batch_size=batch_size, weight_decay=weight_decay, lr_schedule=lr_schedule)
 
 import torch
 import torch.nn.functional as F
@@ -112,11 +118,9 @@ def trainer(
     weight_decay=1e-4,
     grad_clip=1.0,
     warmup_frac=0.05,
-    device=None,
     lr_schedule=[900],
     plot_path=None
 ):
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     set_seed()
 
     ds_train = SphericalDataset(all_data['train'])
