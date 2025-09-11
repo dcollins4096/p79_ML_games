@@ -19,35 +19,36 @@ import loader
 from scipy.ndimage import gaussian_filter
 
 
-idd = 70
-what = "66.  rotation with more capacity"
+idd = 72
+what = "66 but with more capacity"
 
 #fname = "clm_take3_L=4.h5"
 fname = 'p79d_subsets_S32_N5.h5'
 fname = 'p79d_subsets_S128_N5.h5'
 fname = "p79d_subsets_S512_N2_xyz.h5"
 fname = "p79d_subsets_S512_N2_xyz_down_32.h5"
-#fname = "p79d_subsets_S512_N2_xyz_down_128_suite1b.h5"
-fname = "p79d_subsets_S512_N4_xyz_down_128_rot_suite1b.h5"
+fname = "p79d_subsets_S512_N2_xyz_down_128_suite1b.h5"
+fname = "p79d_subsets_S512_N5_xyz_down_128_suite1b_test.h5"
+#fname = "p79d_subsets_S512_N4_xyz_down_128_rot_suite1b.h5"
 #fname = "p79d_subsets_S512_N4_xyz_down_256_rot_suite1b.h5"
 #ntrain = 400
 #ntrain = 500
 #ntrain = 20
-ntrain = 1000
-#ntrain = 50
+#ntrain = 1000
+ntrain = 4000
 #ntrain = 600
 #nvalid=3
 #ntrain = 10
-nvalid=50
+nvalid=100
 downsample = False
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-epochs  = 200
+epochs  = 300
 lr = 1e-3
 #lr = 1e-4
 batch_size=10 
 lr_schedule=[100]
-weight_decay = 5e-3
+weight_decay = 1e-3
 fc_bottleneck=True
 def load_data():
 
@@ -58,9 +59,9 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=64, fc_spatial=16, use_fc_bottleneck=fc_bottleneck)
+    model = main_net(base_channels=64, fc_spatial=16, use_fc_bottleneck=fc_bottleneck, fc_hidden=1024)
 
-    model = model.to(device)
+    model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
     for m in model.modules():
         if isinstance(m, nn.Linear):
@@ -199,6 +200,10 @@ def trainer(
                 vtotal += vloss.item() * xb.size(0)
             val_loss = vtotal / len(ds_val)
             val_curve.append(val_loss)
+        #model.train_curve = torch.tensor(train_curve)
+        #model.val_curve = torch.tensor(val_curve)
+        model.train_curve[epoch-1] = train_loss
+        model.val_curve[epoch-1] = val_loss
 
         # early stopping
         improved = val_loss < best_val - 1e-5
@@ -227,8 +232,6 @@ def trainer(
         elps = format_time( now-t0)
         rem  = format_time(secs_left)
 
-        model.train_curve = torch.tensor(train_curve)
-        model.val_curve = torch.tensor(val_curve)
 
         print(f"[{epoch:3d}/{epochs}] net{idd:d}  train {train_loss:.4f} | val {val_loss:.4f} | "
               f"lr {lr:.2e} | bad {bad_epochs:02d} | ETA {eta} | Remain {rem} | Sofar {elps}")

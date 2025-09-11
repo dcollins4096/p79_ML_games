@@ -19,36 +19,36 @@ import loader
 from scipy.ndimage import gaussian_filter
 
 
-idd = 70
-what = "66.  rotation with more capacity"
+idd = 69
+what = "66 without FC"
 
 #fname = "clm_take3_L=4.h5"
 fname = 'p79d_subsets_S32_N5.h5'
 fname = 'p79d_subsets_S128_N5.h5'
 fname = "p79d_subsets_S512_N2_xyz.h5"
 fname = "p79d_subsets_S512_N2_xyz_down_32.h5"
-#fname = "p79d_subsets_S512_N2_xyz_down_128_suite1b.h5"
-fname = "p79d_subsets_S512_N4_xyz_down_128_rot_suite1b.h5"
+fname = "p79d_subsets_S512_N2_xyz_down_128_suite1b.h5"
+#fname = "p79d_subsets_S512_N4_xyz_down_128_rot_suite1b.h5"
 #fname = "p79d_subsets_S512_N4_xyz_down_256_rot_suite1b.h5"
 #ntrain = 400
 #ntrain = 500
 #ntrain = 20
-ntrain = 1000
-#ntrain = 50
+#ntrain = 1000
+ntrain = 2000
 #ntrain = 600
 #nvalid=3
 #ntrain = 10
-nvalid=50
+nvalid=100
 downsample = False
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-epochs  = 200
+epochs  = 300
 lr = 1e-3
 #lr = 1e-4
 batch_size=10 
 lr_schedule=[100]
-weight_decay = 5e-3
-fc_bottleneck=True
+weight_decay = 1e-3
+fc_bottleneck=False
 def load_data():
 
     print('read the data')
@@ -58,9 +58,9 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=64, fc_spatial=16, use_fc_bottleneck=fc_bottleneck)
+    model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=fc_bottleneck)
 
-    model = model.to(device)
+    model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
     for m in model.modules():
         if isinstance(m, nn.Linear):
