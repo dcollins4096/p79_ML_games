@@ -19,8 +19,8 @@ import loader
 from scipy.ndimage import gaussian_filter
 
 
-idd = 73
-what = "66 with dilation"
+idd = 74
+what = "66 even more dil."
 
 #fname = "clm_take3_L=4.h5"
 fname = 'p79d_subsets_S32_N5.h5'
@@ -43,7 +43,7 @@ nvalid=100
 downsample = False
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-epochs  = 200
+epochs  = 300
 lr = 1e-3
 #lr = 1e-4
 batch_size=10 
@@ -59,7 +59,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=64, fc_spatial=16, use_fc_bottleneck=fc_bottleneck)
+    model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=fc_bottleneck)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -310,8 +310,8 @@ class main_net(nn.Module):
         self.use_fc_bottleneck = use_fc_bottleneck
 
         # Encoder
-        self.enc1 = ResidualBlockSE(in_channels, base_channels, dilation=2)
-        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, dilation = 2)
+        self.enc1 = ResidualBlockSE(in_channels, base_channels, dilation=5)
+        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, dilation = 3)
         self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, dilation = 1)
         self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8)
         self.pool = nn.MaxPool2d(2)

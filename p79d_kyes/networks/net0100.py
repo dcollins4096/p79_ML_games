@@ -19,31 +19,19 @@ import loader
 from scipy.ndimage import gaussian_filter
 
 
-idd = 73
-what = "66 with dilation"
+idd = 100
+what = "66 but regularized valid and train, images"
 
-#fname = "clm_take3_L=4.h5"
-fname = 'p79d_subsets_S32_N5.h5'
-fname = 'p79d_subsets_S128_N5.h5'
-fname = "p79d_subsets_S512_N2_xyz.h5"
-fname = "p79d_subsets_S512_N2_xyz_down_32.h5"
-fname = "p79d_subsets_S512_N2_xyz_down_128_suite1b.h5"
 fname = "p79d_subsets_S512_N5_xyz_down_128_suite1b_test.h5"
-#fname = "p79d_subsets_S512_N4_xyz_down_128_rot_suite1b.h5"
-#fname = "p79d_subsets_S512_N4_xyz_down_256_rot_suite1b.h5"
-#ntrain = 400
-#ntrain = 500
-#ntrain = 2000
-#ntrain = 1000
 ntrain = 2000
 #ntrain = 600
 #nvalid=3
 #ntrain = 10
-nvalid=100
+nvalid=30
 downsample = False
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-epochs  = 200
+epochs  = 300
 lr = 1e-3
 #lr = 1e-4
 batch_size=10 
@@ -59,7 +47,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=64, fc_spatial=16, use_fc_bottleneck=fc_bottleneck)
+    model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=fc_bottleneck)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -232,6 +220,8 @@ def trainer(
         elps = format_time( now-t0)
         rem  = format_time(secs_left)
 
+        #model.train_curve = torch.tensor(train_curve)
+        #model.val_curve = torch.tensor(val_curve)
 
         print(f"[{epoch:3d}/{epochs}] net{idd:d}  train {train_loss:.4f} | val {val_loss:.4f} | "
               f"lr {lr:.2e} | bad {bad_epochs:02d} | ETA {eta} | Remain {rem} | Sofar {elps}")
@@ -268,11 +258,11 @@ def error_real_imag(guess,target):
 
 # ---------------- Residual SE Block ----------------
 class ResidualBlockSE(nn.Module):
-    def __init__(self, in_channels, out_channels, reduction=16,dilation=1):
+    def __init__(self, in_channels, out_channels, reduction=16):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=dilation, dilation=dilation)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=dilation, dilation=dilation)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
 
         # Skip connection if channel mismatch
@@ -310,9 +300,9 @@ class main_net(nn.Module):
         self.use_fc_bottleneck = use_fc_bottleneck
 
         # Encoder
-        self.enc1 = ResidualBlockSE(in_channels, base_channels, dilation=2)
-        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, dilation = 2)
-        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, dilation = 1)
+        self.enc1 = ResidualBlockSE(in_channels, base_channels)
+        self.enc2 = ResidualBlockSE(base_channels, base_channels*2)
+        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4)
         self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8)
         self.pool = nn.MaxPool2d(2)
 
