@@ -18,7 +18,7 @@ plot_models = 1
 
 
 if new_model:
-    import networks.net0068 as net
+    import networks.net0101 as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
@@ -83,8 +83,10 @@ if plot_models:
                     moo = moo.cpu()
             errs = np.array([e.item() for e in err[subset]])
             args = np.argsort(errs)
-            dothese = np.concatenate([args[:10],args[-10:]])
-            print(errs[dothese])
+            if subset == 'train':
+                dothese = np.concatenate([np.arange(10),args[:10],args[-10:]])
+            else:
+                dothese = np.arange( len(this_set))
             for i,n in enumerate(dothese):
                 Tmode = this_set[n][0]
                 if len(Tmode.shape) == 3:
