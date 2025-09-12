@@ -11,14 +11,14 @@ import matplotlib as mpl
 reload(loader)
 
 new_model   = 1
-load_model  = 0
-train_model = 1
+load_model  = 1
+train_model = 0
 save_model  = 1
 plot_models = 1
 
 
 if new_model:
-    import networks.net0101 as net
+    import networks.net0105 as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
@@ -78,9 +78,13 @@ if plot_models:
                     if len(Tmode.shape) == 3:
                         Tmode = Tmode.squeeze(0)
                     moo = model( Tmode.unsqueeze(0).to(net.device))
-                    EB = this_set[n][1]
-                    err[subset].append( model.criterion(moo,EB.unsqueeze(0).to(net.device)))
-                    moo = moo.cpu()
+                    if type(moo) == tuple:
+                        moo = [mmm.cpu() for mmm in moo]
+                        EB = this_set[n][1][0:1]
+                    else:
+                        moo = moo.cpu()
+                        EB = this_set[n][1]
+                    err[subset].append( model.criterion(moo,EB.unsqueeze(0)))
             errs = np.array([e.item() for e in err[subset]])
             args = np.argsort(errs)
             if subset == 'train':
@@ -92,8 +96,16 @@ if plot_models:
                 if len(Tmode.shape) == 3:
                     Tmode = Tmode.squeeze(0)
                 moo = model( Tmode.unsqueeze(0).to(net.device))
-                moo = moo.cpu()
-                EB = this_set[n][1]
+                if type(moo) == tuple:
+                    moo = moo[0].cpu()
+                    EB = this_set[n][1]
+                    Etarget = EB[0]
+                    Eguess=moo[0][0].detach().numpy()
+                else:
+                    moo = moo.cpu()
+                    EB = this_set[n][1][0]
+                    Etarget = EB
+                    Eguess=moo[0][0].detach().numpy()
                 thiserr = errs[n]
                 #plot_multipole.rmplot( sky[subset][n], rm, clm_model = moo, clm_real = clm, fname = "rm_and_sampled_%04d"%n)
                 if 1:
@@ -103,8 +115,6 @@ if plot_models:
                     ppp = ax0[0].imshow(Tmode)
                     fig.colorbar(ppp,ax=ax0[0])
                     ax0[0].set(title='T')
-                    Etarget = EB[0]
-                    Eguess=moo[0][0].detach().numpy()
                     Emin = min([Etarget.min(), Eguess.min()])
                     Emax = max([Etarget.max(), Eguess.max()])
                     Enorm = mpl.colors.Normalize(vmin=Emin,vmax=Emax)
@@ -116,7 +126,7 @@ if plot_models:
                     ppp=ax1[1].imshow(Eguess,norm=Enorm)
                     fig.colorbar(ppp,ax=ax1[1])
                     ax1[1].set(title='E guess')
-                    if moo.shape[1]>1:
+                    if moo.shape[1]>1 and False:
                         Btarget = EB[1]
                         Bguess=moo[0][1].detach().numpy()
                         Bmin = min([Btarget.min(), Bguess.min()])
@@ -128,8 +138,8 @@ if plot_models:
                         ax1[2].set(title='B guess')
                     fig.colorbar(ppp,ax=ax1[2])
 
-                    E1 = EB[0].detach().numpy().flatten()
-                    E2 = moo[0][0].detach().numpy().flatten()
+                    E1 = Etarget.flatten()
+                    E2 = Eguess.flatten()
                     ax1[0].set(title='%0.4f'%thiserr)
                     pch.simple_phase(E1,E2,ax=ax1[0])
                     mmin = E1.min()
