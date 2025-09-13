@@ -23,7 +23,7 @@ idd = 105
 what = "100 with multi scale supervision"
 
 fname = "p79d_subsets_S512_N5_xyz_down_128_suite1b_test.h5"
-ntrain = 2000
+ntrain = 100
 #ntrain = 600
 #nvalid=3
 #ntrain = 10
@@ -158,7 +158,8 @@ def trainer(
                 preds = model(xb)
                 if verbose:
                     print("  crit")
-                loss  = model.criterion(preds, yb)
+
+                loss  = model.criterion(preds, yb[:,0:1,:,:])
 
             if verbose:
                 print("  scale backward")
@@ -184,7 +185,7 @@ def trainer(
                 xb = xb.to(device)
                 yb = yb.to(device)
                 preds = model(xb)
-                vloss = model.criterion(preds, yb)
+                vloss = model.criterion(preds, yb[:,0:1,:,:])
                 vtotal += vloss.item() * xb.size(0)
             val_loss = vtotal / len(ds_val)
             val_curve.append(val_loss)
