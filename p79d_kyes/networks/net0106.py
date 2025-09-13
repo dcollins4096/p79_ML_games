@@ -19,8 +19,8 @@ import loader
 from scipy.ndimage import gaussian_filter
 
 
-idd = 105
-what = "100 with multi scale supervision"
+idd = 106
+what = "100 + 102 + 104 + 105"
 
 fname = "p79d_subsets_S512_N5_xyz_down_128_suite1b_test.h5"
 ntrain = 2000
@@ -47,7 +47,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=fc_bottleneck)
+    model = main_net(base_channels=64, fc_spatial=16, use_fc_bottleneck=fc_bottleneck)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -315,9 +315,9 @@ class main_net(nn.Module):
             self.fc2 = nn.Linear(fc_hidden, base_channels*8*fc_spatial*fc_spatial)
 
         # Learned upsampling via ConvTranspose2d
-        self.up4 = nn.ConvTranspose2d(base_channels*8, base_channels*8, kernel_size=2, stride=2)
-        self.up3 = nn.ConvTranspose2d(base_channels*4, base_channels*4, kernel_size=2, stride=2)
-        self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=2, stride=2)
+        self.up4 = nn.ConvTranspose2d(base_channels*8, base_channels*8, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.up3 = nn.ConvTranspose2d(base_channels*4, base_channels*4, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
 
         # Decoder with skip connections
         self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4)
