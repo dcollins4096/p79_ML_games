@@ -11,14 +11,14 @@ import matplotlib as mpl
 reload(loader)
 
 new_model   = 1
-load_model  = 1
-train_model = 0
+load_model  = 0
+train_model = 1
 save_model  = 1
 plot_models = 1
 
 
 if new_model:
-    import networks.net0105 as net
+    import networks.net0123 as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
@@ -34,7 +34,6 @@ if train_model:
 
     #import networks.net0064 as othernet
     net.train(model,all_data)
-
     if save_model:
         oname = "models/test%d.pth"%model.idd
         torch.save(model.state_dict(), oname)
@@ -55,12 +54,12 @@ if plot_models:
     if hasattr(net,'DatasetNorm'):
         ds_train = net.DatasetNorm(all_data['train'], compute_stats=True)
         ds_val   = net.DatasetNorm(all_data['valid'], mean_x=ds_train.mean_x, std_x=ds_train.std_x, mean_y=ds_train.mean_y, std_y=ds_train.std_y)
-        ds_tst   = net.DatasetNorm(all_data['test'], mean_x=ds_train.mean_x, std_x=ds_train.std_x, mean_y=ds_train.mean_y, std_y=ds_train.std_y)
+        #ds_tst   = net.DatasetNorm(all_data['test'], mean_x=ds_train.mean_x, std_x=ds_train.std_x, mean_y=ds_train.mean_y, std_y=ds_train.std_y)
 
     else:
         ds_train = net.SphericalDataset(all_data['train'])
         ds_val   = net.SphericalDataset(all_data['valid'])
-        ds_tst   = net.SphericalDataset(all_data['test'])
+        #ds_tst   = net.SphericalDataset(all_data['test'])
     print('ploot')
     delta = []
     err={'train':[],'valid':[],'test':[]}
@@ -70,7 +69,9 @@ if plot_models:
     for ns,subset in enumerate(subs):
         mmin=20
         mmax=-20
-        this_set = {'train':ds_train, 'valid':ds_val, 'test':ds_tst}[subset]
+        #this_set = {'train':ds_train, 'valid':ds_val, 'test':ds_tst}[subset]
+        this_set = {'train':ds_train, 'valid':ds_val}[subset]
+
         with torch.no_grad():
             for n in range(len(this_set)):
                 if 1:
@@ -80,10 +81,17 @@ if plot_models:
                     moo = model( Tmode.unsqueeze(0).to(net.device))
                     if type(moo) == tuple:
                         moo = [mmm.cpu() for mmm in moo]
-                        EB = this_set[n][1][0:1]
+                        if moo[0].shape[1] == 2:
+                            EB = this_set[n][1]
+                        else:
+                            EB = this_set[n][1][0:1]
                     else:
                         moo = moo.cpu()
-                        EB = this_set[n][1]
+                        if moo[0].shape[1] == 2:
+                            EB = this_set[n]
+                        else:
+                            EB = this_set[n][1]
+
                     err[subset].append( model.criterion(moo,EB.unsqueeze(0)))
             errs = np.array([e.item() for e in err[subset]])
             args = np.argsort(errs)
@@ -96,11 +104,17 @@ if plot_models:
                 if len(Tmode.shape) == 3:
                     Tmode = Tmode.squeeze(0)
                 moo = model( Tmode.unsqueeze(0).to(net.device))
+                do_b=False
                 if type(moo) == tuple:
-                    moo = moo[0].cpu()
+                    EBguess = moo[0].cpu()
                     EB = this_set[n][1]
                     Etarget = EB[0]
-                    Eguess=moo[0][0].detach().numpy()
+                    Eguess=EBguess[0][0].detach().numpy()
+                    if moo[0].shape[1] == 2:
+                        do_b = True
+                        Btarget = EB[1]
+                        Bguess=EBguess[0][1].detach().numpy()
+
                 else:
                     moo = moo.cpu()
                     EB = this_set[n][1][0]
@@ -126,9 +140,7 @@ if plot_models:
                     ppp=ax1[1].imshow(Eguess,norm=Enorm)
                     fig.colorbar(ppp,ax=ax1[1])
                     ax1[1].set(title='E guess')
-                    if moo.shape[1]>1 and False:
-                        Btarget = EB[1]
-                        Bguess=moo[0][1].detach().numpy()
+                    if do_b:
                         Bmin = min([Btarget.min(), Bguess.min()])
                         Bmax = max([Btarget.max(), Bguess.max()])
                         Bnorm = mpl.colors.Normalize(vmin=Bmin,vmax=Bmax)
@@ -158,6 +170,6 @@ if plot_models:
     oname = '%s/plots/errhist_net%d'%(os.environ['HOME'],model.idd)
     print(oname)
     fig1.savefig(oname)
-    plt.close('all')
+
 
 
