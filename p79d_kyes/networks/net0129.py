@@ -21,7 +21,7 @@ from scipy.ndimage import gaussian_filter
 
 
 idd = 128
-what = "118 with SSIM and gradient loss and pearson loss"
+what = "128 with more capacity"
 
 fname_train = "p79d_subsets_S512_N5_xyz_down_128_2356_x.h5"
 fname_valid = "p79d_subsets_S512_N5_xyz_down_128_4_x.h5"
@@ -38,7 +38,7 @@ epochs  = 200
 #epochs = 20
 lr = 1e-3
 #lr = 1e-4
-batch_size=10 
+batch_size=1
 lr_schedule=[100]
 weight_decay = 1e-3
 fc_bottleneck=True
@@ -53,7 +53,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=True)
+    model = main_net(base_channels=16,fc_hidden=512 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=True, attn_heads=3)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -503,7 +503,7 @@ class main_net(nn.Module):
         pear_t  = 1-my_pearsonr(out_main[:,0:1,:,:].flatten(), target[:,0:1,:,:].flatten())
         pear_e  = 1-my_pearsonr(out_main[:,1:2,:,:].flatten(), target[:,1:2,:,:].flatten())
         pear_b  = 1-my_pearsonr(out_main[:,2:3,:,:].flatten(), target[:,2:3,:,:].flatten())
-        lambda_pear = 1.0*(pear_e+pear_b+pear_t)
+        lambda_pear = 2.0*(pear_e+pear_b+pear_t)
 
         lambda_ssim = 1.0*(ssim_e+ssim_b+ssim_t)
         lambda_grad = 1.0*(grad_e+grad_b+grad_t)
