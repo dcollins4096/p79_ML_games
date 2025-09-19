@@ -8,17 +8,19 @@ import matplotlib.pyplot as plt
 import time
 import loader
 import matplotlib as mpl
+import dtools_global.vis.pcolormesh_helper as pch
+from scipy.stats import pearsonr
 reload(loader)
 
 new_model   = 1
 load_model  = 0
 train_model = 1
-save_model  = 1
+save_model  = 0
 plot_models = 1
 
 
 if new_model:
-    import networks.net0123 as net
+    import networks.net0129 as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
@@ -63,9 +65,11 @@ if plot_models:
     print('ploot')
     delta = []
     err={'train':[],'valid':[],'test':[]}
+    detail_err = {'train':[],'valid':[],'test':[]}
     subs = ['train','valid','test']
     subs = ['train','valid']
-    fig1,ax=plt.subplots(1,3,figsize=(12,4))
+    fig1,ax=plt.subplots(2,3,figsize=(12,4))
+
     for ns,subset in enumerate(subs):
         mmin=20
         mmax=-20
@@ -81,7 +85,8 @@ if plot_models:
                     moo = model( Tmode.unsqueeze(0).to(net.device))
                     if type(moo) == tuple:
                         moo = [mmm.cpu() for mmm in moo]
-                        if moo[0].shape[1] == 2:
+                        nchannels = moo[0].shape[1]
+                        if nchannels == 2 or nchannels == 3:
                             EB = this_set[n][1]
                         else:
                             EB = this_set[n][1][0:1]
@@ -92,6 +97,7 @@ if plot_models:
                         else:
                             EB = this_set[n][1]
 
+                    detail_err[subset].append(  model.criterion1(moo,EB.unsqueeze(0)))
                     err[subset].append( model.criterion(moo,EB.unsqueeze(0)))
             errs = np.array([e.item() for e in err[subset]])
             args = np.argsort(errs)
@@ -100,72 +106,76 @@ if plot_models:
             else:
                 dothese = np.arange( len(this_set))
             for i,n in enumerate(dothese):
+                if i>30:
+                    break
                 Tmode = this_set[n][0]
                 if len(Tmode.shape) == 3:
                     Tmode = Tmode.squeeze(0)
                 moo = model( Tmode.unsqueeze(0).to(net.device))
                 do_b=False
                 if type(moo) == tuple:
-                    EBguess = moo[0].cpu()
+                    EBguess = moo[0].cpu().squeeze(0)
                     EB = this_set[n][1]
-                    Etarget = EB[0]
-                    Eguess=EBguess[0][0].detach().numpy()
-                    if moo[0].shape[1] == 2:
-                        do_b = True
-                        Btarget = EB[1]
-                        Bguess=EBguess[0][1].detach().numpy()
 
-                else:
-                    moo = moo.cpu()
-                    EB = this_set[n][1][0]
-                    Etarget = EB
-                    Eguess=moo[0][0].detach().numpy()
                 thiserr = errs[n]
                 #plot_multipole.rmplot( sky[subset][n], rm, clm_model = moo, clm_real = clm, fname = "rm_and_sampled_%04d"%n)
-                if 1:
-                    import dtools_global.vis.pcolormesh_helper as pch
-                    fig,axes=plt.subplots(2,3,figsize=(14,8))
-                    ax0,ax1=axes
-                    ppp = ax0[0].imshow(Tmode)
-                    fig.colorbar(ppp,ax=ax0[0])
-                    ax0[0].set(title='T')
+                def plot_three(Eguess,Etarget,axs=None, title=''):
                     Emin = min([Etarget.min(), Eguess.min()])
                     Emax = max([Etarget.max(), Eguess.max()])
                     Enorm = mpl.colors.Normalize(vmin=Emin,vmax=Emax)
-                    ppp=ax0[1].imshow(Etarget,norm=Enorm)
-                    fig.colorbar(ppp,ax=ax0[1])
-                    ax0[1].set(title='E actual')
-                    ax0[2].set(title='B actual')
-
-                    ppp=ax1[1].imshow(Eguess,norm=Enorm)
-                    fig.colorbar(ppp,ax=ax1[1])
-                    ax1[1].set(title='E guess')
-                    if do_b:
-                        Bmin = min([Btarget.min(), Bguess.min()])
-                        Bmax = max([Btarget.max(), Bguess.max()])
-                        Bnorm = mpl.colors.Normalize(vmin=Bmin,vmax=Bmax)
-                        ppp=ax0[2].imshow(Btarget,norm=Bnorm)
-                        fig.colorbar(ppp,ax=ax0[2])
-                        ppp=ax1[2].imshow(Bguess,norm=Bnorm)
-                        ax1[2].set(title='B guess')
-                    fig.colorbar(ppp,ax=ax1[2])
-
+                    ppp=axs[0].imshow(Etarget,norm=Enorm)
+                    fig.colorbar(ppp,ax=axs[0])
+                    axs[0].set(title='%s actual'%title)
+                    ppp=axs[1].imshow(Eguess,norm=Enorm)
+                    fig.colorbar(ppp,ax=axs[1])
+                    axs[1].set(title='%s guess'%title)
+                    er = pearsonr( Eguess.flatten(), Etarget.flatten())[0]
+                    fig.colorbar(ppp,ax=axs[2])
+                    axs[2].set(title='pearson %0.4f'%er)
                     E1 = Etarget.flatten()
                     E2 = Eguess.flatten()
-                    ax1[0].set(title='%0.4f'%thiserr)
-                    pch.simple_phase(E1,E2,ax=ax1[0])
-                    mmin = E1.min()
-                    mmax = E1.max()
-                    ax1[0].plot( [mmin,mmax],[mmin,mmax],c='k')
+                    pch.simple_phase(E1,E2,ax=axs[2])
+                    axs[2].plot( [Emin,Emax],[Emin,Emax],c='k')
+
+                if 1:
+                    fig,axes=plt.subplots(3,3,figsize=(14,8))
+                    ax0,ax1,ax2=axes
+                    if EBguess.shape[0]==3:
+                        plot_three(EBguess[0,:,:], EB[0,:,:],title='T', axs=ax0)
+                        plot_three(EBguess[1,:,:], EB[1,:,:],title='E', axs=ax1)
+                        plot_three(EBguess[2,:,:], EB[2,:,:],title='B', axs=ax2)
+                    elif EBguess.shape[0]==2:
+                        #plot_three(EBguess[0,:,:], EB[0,:,:],title='T', axs=ax0)
+                        for aaa in ax0:
+                            aaa.imshow(Tmode)
+                        plot_three(EBguess[0,:,:], EB[0,:,:],title='E', axs=ax1)
+                        plot_three(EBguess[1,:,:], EB[1,:,:],title='B', axs=ax2)
 
 
+
+
+
+
+                    fig.tight_layout()
                     fig.savefig('%s/plots/show_net%d_%s_%04d'%(os.environ['HOME'],model.idd,subset,i))
                     plt.close(fig)
 
 
 
         #this_err = torch.tensor(err[subset]).detach().numpy()
-        ax[ns].hist(errs)
+        ax[0][ns].hist(errs)
+        thiserr = torch.stack(detail_err[subset]).cpu().detach().numpy()
+        args = np.argsort( thiserr, axis=0)
+        labels = ['1','2','3','4','SSIM','Grad','Pear']
+        for nerr in range( thiserr.shape[1]):
+            a = thiserr[args,nerr].flatten()
+            a.sort()
+            ax[1][ns].plot( a, label=labels[nerr])
+        ax[1][ns].legend(loc=0)
+
+
+
+    
     fig1.tight_layout()
     oname = '%s/plots/errhist_net%d'%(os.environ['HOME'],model.idd)
     print(oname)
