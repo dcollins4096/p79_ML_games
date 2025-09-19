@@ -20,7 +20,7 @@ from scipy.ndimage import gaussian_filter
 
 
 
-idd = 128
+idd = 129
 what = "128 with more capacity"
 
 fname_train = "p79d_subsets_S512_N5_xyz_down_128_2356_x.h5"
@@ -53,7 +53,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=16,fc_hidden=512 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=True, attn_heads=3)
+    model = main_net(base_channels=16,fc_hidden=512 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=True, attn_heads=1)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -138,6 +138,7 @@ def trainer(
         milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
         gamma=0.1             # multiply by gamma each time
     )
+    scaler = torch.amp.GradScaler('cuda')
 
     best_val = float("inf")
     best_state = None
@@ -160,7 +161,7 @@ def trainer(
             optimizer.zero_grad(set_to_none=True)
             if verbose:
                 print("  model")
-            if 1:
+            with torch.amp.autocast('cuda'):
                 preds = model(xb)
                 if verbose:
                     print("  crit")
@@ -170,11 +171,15 @@ def trainer(
 
             if verbose:
                 print("  scale backward")
-            loss.backward()
+            #loss.backward()
+            scaler.scale(loss).backward()
+            
 
             if verbose:
                 print("  steps")
-            optimizer.step()
+            #optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             running += loss.item() * xb.size(0)
 
@@ -340,19 +345,64 @@ def ssim_loss(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
 
     return 1 - ssim_map.mean()  # SSIM loss
 
-class CrossAttention(nn.Module):
-    def __init__(self, channels, num_heads=4):
+class CrossAttentionPooledKV(nn.Module):
+    def __init__(self, channels, num_heads=4, kv_pool_factor=4):
+        """
+        kv_pool_factor: how much spatially to downsample K and V (integer).
+                       kv_pool_factor=4 -> (H*W) -> (H/4 * W/4)
+        """
         super().__init__()
-        self.attn = nn.MultiheadAttention(channels, num_heads, batch_first=True)
+        assert channels % num_heads == 0, "channels must be divisible by num_heads"
+        self.num_heads = num_heads
+        self.channels = channels
+        self.kv_pool_factor = kv_pool_factor
+
+        # We'll use linear projections for Q,K,V and then a standard scaled dot-product
+        self.q_proj = nn.Conv2d(channels, channels, kernel_size=1)
+        self.k_proj = nn.Conv2d(channels, channels, kernel_size=1)
+        self.v_proj = nn.Conv2d(channels, channels, kernel_size=1)
+
+        self.out_proj = nn.Conv2d(channels, channels, kernel_size=1)
 
     def forward(self, x):
-        """
-        x: [B, C, H, W]
-        """
+        # x: [B, C, H, W]
         B, C, H, W = x.shape
-        x_flat = x.view(B, C, H * W).transpose(1, 2)  # -> [B, HW, C]
-        x_attn, _ = self.attn(x_flat, x_flat, x_flat) # self-attention
-        return x_attn.transpose(1, 2).view(B, C, H, W)
+        q = self.q_proj(x)                # [B, C, H, W]
+
+        # Pool K and V spatially to reduce sequence length
+        if self.kv_pool_factor > 1:
+            k_src = F.adaptive_avg_pool2d(x, (H // self.kv_pool_factor, W // self.kv_pool_factor))
+            v_src = k_src
+        else:
+            k_src = x
+            v_src = x
+
+        k = self.k_proj(k_src)            # [B, C, Hk, Wk]
+        v = self.v_proj(v_src)            # [B, C, Hk, Wk]
+
+        # reshape to [B, heads, seq, head_dim]
+        head_dim = C // self.num_heads
+        def reshape_for_attn(t, Ht, Wt):
+            # t: [B, C, Ht, Wt] -> [B, heads, Ht*Wt, head_dim]
+            t = t.view(B, self.num_heads, head_dim, Ht * Wt).permute(0,1,3,2)
+            return t
+
+        q_flat = reshape_for_attn(q, H, W)             # [B, h, S_q, d]
+        k_flat = reshape_for_attn(k, k.shape[-2], k.shape[-1])  # [B, h, S_k, d]
+        v_flat = reshape_for_attn(v, k.shape[-2], k.shape[-1])  # [B, h, S_k, d]
+
+        # scaled dot product: [B, h, S_q, S_k]
+        scale = 1.0 / math.sqrt(head_dim)
+        attn_logits = torch.matmul(q_flat, k_flat.transpose(-2, -1)) * scale
+        attn = torch.softmax(attn_logits, dim=-1)
+
+        # output: [B, h, S_q, d]
+        out = torch.matmul(attn, v_flat)
+
+        # merge heads back: [B, C, H, W]
+        out = out.permute(0,1,3,2).contiguous().view(B, C, H, W)
+        out = self.out_proj(out)
+        return out
 
 
 def gradient_loss(pred, target):
@@ -427,7 +477,7 @@ class main_net(nn.Module):
 
         # Optional cross-attention
         if use_cross_attention:
-            self.cross_attn = CrossAttention(out_channels, num_heads=attn_heads)
+            self.cross_attn = CrossAttentionPooledKV(out_channels, num_heads=attn_heads)
 
         self.register_buffer("train_curve", torch.zeros(epochs))
         self.register_buffer("val_curve", torch.zeros(epochs))
