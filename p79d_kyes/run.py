@@ -10,17 +10,20 @@ import loader
 import matplotlib as mpl
 import dtools_global.vis.pcolormesh_helper as pch
 from scipy.stats import pearsonr
+import tqdm
+import torch_power
 reload(loader)
+reload(torch_power)
 
 new_model   = 1
 load_model  = 0
 train_model = 1
-save_model  = 0
+save_model  = 1
 plot_models = 1
 
 
 if new_model:
-    import networks.net0129 as net
+    import networks.net0139 as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
@@ -77,7 +80,10 @@ if plot_models:
         this_set = {'train':ds_train, 'valid':ds_val}[subset]
 
         with torch.no_grad():
-            for n in range(len(this_set)):
+            for n in tqdm.tqdm(range(len(this_set))):
+                if n <-1:
+                    continue
+
                 if 1:
                     Tmode = this_set[n][0]
                     if len(Tmode.shape) == 3:
@@ -105,7 +111,7 @@ if plot_models:
                 dothese = np.concatenate([np.arange(10),args[:10],args[-10:]])
             else:
                 dothese = np.arange( len(this_set))
-            for i,n in enumerate(dothese):
+            for i,n in tqdm.tqdm(enumerate(dothese)):
                 if i>30:
                     break
                 Tmode = this_set[n][0]
@@ -136,9 +142,20 @@ if plot_models:
                     E2 = Eguess.flatten()
                     pch.simple_phase(E1,E2,ax=axs[2])
                     axs[2].plot( [Emin,Emax],[Emin,Emax],c='k')
+                    import dtools_global.math.power_spectrum as ps
+                    if len(axs)==4:
+                        #power_guess = torch_power.powerspectrum(Eguess)
+                        #power_target = torch_power.powerspectrum(Etarget)
+                        power_guess = ps.powerspectrum(Eguess.detach().numpy())
+                        power_target = ps.powerspectrum(Etarget.detach().numpy())
+                        axs[3].plot( power_guess.kcen, power_guess.avgpower, c='r')
+                        axs[3].plot( power_target.kcen, power_target.avgpower, c='k')
+                        axs[3].set(xscale='log',yscale='log')
+
+
 
                 if 1:
-                    fig,axes=plt.subplots(3,3,figsize=(14,8))
+                    fig,axes=plt.subplots(3,4,figsize=(14,8))
                     ax0,ax1,ax2=axes
                     if EBguess.shape[0]==3:
                         plot_three(EBguess[0,:,:], EB[0,:,:],title='T', axs=ax0)
@@ -166,11 +183,12 @@ if plot_models:
         ax[0][ns].hist(errs)
         thiserr = torch.stack(detail_err[subset]).cpu().detach().numpy()
         args = np.argsort( thiserr, axis=0)
-        labels = ['1','2','3','4','SSIM','Grad','Pear']
+        labels = ['1','2','3','4','SSIM','Grad','Pear','Power']
+        col = ['c','m','y','r','g','b','brown','purple']
         for nerr in range( thiserr.shape[1]):
             a = thiserr[args,nerr].flatten()
             a.sort()
-            ax[1][ns].plot( a, label=labels[nerr])
+            ax[1][ns].hist( a, label=labels[nerr], histtype='step', color=col[nerr])
         ax[1][ns].legend(loc=0)
 
 

@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 
 
 
-idd = 129
-what = "128 with more capacity"
+idd = 131
+what = "128 with cross attention"
 
 fname_train = "p79d_subsets_S512_N5_xyz_down_128_2356_x.h5"
 fname_valid = "p79d_subsets_S512_N5_xyz_down_128_4_x.h5"
@@ -53,7 +53,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=16,fc_hidden=512 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=True, attn_heads=1)
+    model = main_net(base_channels=16,fc_hidden=512 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -529,7 +529,7 @@ class main_net(nn.Module):
         if use_cross_attention:
             self.cross_attn = CrossAttentionBlockPooledKV(
                 q_channels=base_channels,   # decoder output channels
-                kv_channels=base_channels * 4,  # encoder skip (e3) channels
+                kv_channels=base_channels * 8,  # encoder skip (e3) channels
                 num_heads=2,
                 reduction=2
             )
@@ -571,7 +571,6 @@ class main_net(nn.Module):
         d2 = self.dec2(d2)
 
         # --- Cross-Attention Fusion ---
-        pdb.set_trace()
         if self.use_cross_attention:
             d2 = self.cross_attn(d2, e4)
 
@@ -582,8 +581,6 @@ class main_net(nn.Module):
         out_d3 = self.out_d3(d3)
         out_d2 = self.out_d2(d2)
 
-        if self.use_cross_attention:
-            out_main = self.cross_attn(out_main)
 
         return out_main, out_d2, out_d3, out_d4
 

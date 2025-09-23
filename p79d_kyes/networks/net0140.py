@@ -17,28 +17,28 @@ import torch.optim as optim
 import pdb
 import loader
 from scipy.ndimage import gaussian_filter
+import torch_power
 
 
+idd = 140
+what = "Switch everything."
 
-idd = 130
-what = "cross attention"
-
-fname_train = "p79d_subsets_S512_N5_xyz_down_128_2356_x.h5"
-fname_valid = "p79d_subsets_S512_N5_xyz_down_128_4_x.h5"
+fname_train = "p79d_subsets_S512_N5_xyz_down_128_2356.h5"
+fname_valid = "p79d_subsets_S512_N5_xyz_down_128_4.h5"
 #ntrain = 2000
-ntrain = 1000
-#ntrain = 600
+ntrain = 1000 #ntrain = 600
+#ntrain = 3000
 #nvalid=3
 #ntrain = 10
 nvalid=30
 downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-epochs  = 200
-#epochs = 20
+#epochs  = 20
+epochs = 200
 lr = 1e-3
 #lr = 1e-4
-batch_size=10
+batch_size=10 
 lr_schedule=[100]
 weight_decay = 1e-3
 fc_bottleneck=True
@@ -47,13 +47,13 @@ def load_data():
     print('read the data')
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
     valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
-    all_data={'train':train['train'],'valid':valid['valid']}
+    all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test']}
     print('done')
     return all_data
 
 def thisnet():
 
-    model = main_net()
+    model = main_net(base_channels=32,fc_hidden=512 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -138,7 +138,6 @@ def trainer(
         milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
         gamma=0.1             # multiply by gamma each time
     )
-    scaler = torch.amp.GradScaler('cuda')
 
     best_val = float("inf")
     best_state = None
@@ -161,7 +160,7 @@ def trainer(
             optimizer.zero_grad(set_to_none=True)
             if verbose:
                 print("  model")
-            with torch.amp.autocast('cuda'):
+            if 1:
                 preds = model(xb)
                 if verbose:
                     print("  crit")
@@ -171,15 +170,11 @@ def trainer(
 
             if verbose:
                 print("  scale backward")
-            #loss.backward()
-            scaler.scale(loss).backward()
-            
+            loss.backward()
 
             if verbose:
                 print("  steps")
-            #optimizer.step()
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
 
             running += loss.item() * xb.size(0)
 
@@ -263,6 +258,17 @@ def plot_loss_curve(model):
     plt.tight_layout()
     plt.savefig("%s/plots/errtime_net%04d"%(os.environ['HOME'], model.idd))
 
+def power_spectrum_delta(guess,target):
+    T_guess = torch_power.powerspectrum(guess)
+    T_target = torch_power.powerspectrum(target)
+    output = torch.mean( torch.abs(torch.log(T_guess.avgpower/(T_target.avgpower+1e-8))))
+    return output
+
+def power_spectra_crit(guess,target):
+    err_T = power_spectrum_delta(guess[:,0:1,:,:], target[:,0:1,:,:])
+    err_E = power_spectrum_delta(guess[:,1:2,:,:], target[:,1:2,:,:])
+    err_B = power_spectrum_delta(guess[:,2:3,:,:], target[:,2:3,:,:])
+    return err_T+err_E+err_B
 
 def error_real_imag(guess,target):
 
@@ -270,9 +276,12 @@ def error_real_imag(guess,target):
     L1 += F.l1_loss(guess.imag, target.imag)
     return L1
 
-# ---------------- Residual SE Block ----------------
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class ResidualBlockSE(nn.Module):
-    def __init__(self, in_channels, out_channels, reduction=16):
+    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg"):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
@@ -284,9 +293,27 @@ class ResidualBlockSE(nn.Module):
         if in_channels != out_channels:
             self.proj = nn.Conv2d(in_channels, out_channels, 1)
 
-        # SE attention
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc1 = nn.Linear(out_channels, out_channels // reduction)
+        # --- Pooling variants ---
+        self.pool_type = pool_type
+        if pool_type == "avg":
+            self.pool = nn.AdaptiveAvgPool2d(1)
+        elif pool_type == "max":
+            self.pool = nn.AdaptiveMaxPool2d(1)
+        elif pool_type == "avgmax":
+            # Concatenate avg + max → doubles channels for fc1
+            self.pool_avg = nn.AdaptiveAvgPool2d(1)
+            self.pool_max = nn.AdaptiveMaxPool2d(1)
+        elif pool_type == "learned":
+            # 1x1 conv to learn pooling weights (H×W → 1)
+            self.pool = nn.Conv2d(out_channels, 1, kernel_size=1)
+
+        # --- SE MLP ---
+        if pool_type == "avgmax":
+            se_in = 2 * out_channels
+        else:
+            se_in = out_channels
+
+        self.fc1 = nn.Linear(se_in, out_channels // reduction)
         self.fc2 = nn.Linear(out_channels // reduction, out_channels)
 
     def forward(self, x):
@@ -294,8 +321,21 @@ class ResidualBlockSE(nn.Module):
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
 
-        # SE attention
-        w = self.global_pool(out).view(out.size(0), -1)
+        # --- SE attention pooling ---
+        if self.pool_type == "avg":
+            w = self.pool(out).view(out.size(0), -1)
+        elif self.pool_type == "max":
+            w = self.pool(out).view(out.size(0), -1)
+        elif self.pool_type == "avgmax":
+            w_avg = self.pool_avg(out).view(out.size(0), -1)
+            w_max = self.pool_max(out).view(out.size(0), -1)
+            w = torch.cat([w_avg, w_max], dim=1)
+        elif self.pool_type == "learned":
+            # Apply learned 1x1 conv → softmax over spatial dims
+            weights = F.softmax(self.pool(out).view(out.size(0), -1), dim=1)
+            w = torch.sum(out.view(out.size(0), out.size(1), -1) * weights.unsqueeze(1), dim=-1)
+
+        # --- SE excitation ---
         w = F.relu(self.fc1(w))
         w = torch.sigmoid(self.fc2(w)).view(out.size(0), out.size(1), 1, 1)
         out = out * w
@@ -306,9 +346,6 @@ class ResidualBlockSE(nn.Module):
         out += identity
         return F.relu(out)
 
-# ---------------- Main Net ----------------
-import torch
-import torch.nn.functional as F
 
 def ssim_loss(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
     """
@@ -345,64 +382,19 @@ def ssim_loss(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
 
     return 1 - ssim_map.mean()  # SSIM loss
 
-class CrossAttentionPooledKV(nn.Module):
-    def __init__(self, channels, num_heads=4, kv_pool_factor=4):
-        """
-        kv_pool_factor: how much spatially to downsample K and V (integer).
-                       kv_pool_factor=4 -> (H*W) -> (H/4 * W/4)
-        """
+class CrossAttention(nn.Module):
+    def __init__(self, channels, num_heads=4):
         super().__init__()
-        assert channels % num_heads == 0, "channels must be divisible by num_heads"
-        self.num_heads = num_heads
-        self.channels = channels
-        self.kv_pool_factor = kv_pool_factor
-
-        # We'll use linear projections for Q,K,V and then a standard scaled dot-product
-        self.q_proj = nn.Conv2d(channels, channels, kernel_size=1)
-        self.k_proj = nn.Conv2d(channels, channels, kernel_size=1)
-        self.v_proj = nn.Conv2d(channels, channels, kernel_size=1)
-
-        self.out_proj = nn.Conv2d(channels, channels, kernel_size=1)
+        self.attn = nn.MultiheadAttention(channels, num_heads, batch_first=True)
 
     def forward(self, x):
-        # x: [B, C, H, W]
+        """
+        x: [B, C, H, W]
+        """
         B, C, H, W = x.shape
-        q = self.q_proj(x)                # [B, C, H, W]
-
-        # Pool K and V spatially to reduce sequence length
-        if self.kv_pool_factor > 1:
-            k_src = F.adaptive_avg_pool2d(x, (H // self.kv_pool_factor, W // self.kv_pool_factor))
-            v_src = k_src
-        else:
-            k_src = x
-            v_src = x
-
-        k = self.k_proj(k_src)            # [B, C, Hk, Wk]
-        v = self.v_proj(v_src)            # [B, C, Hk, Wk]
-
-        # reshape to [B, heads, seq, head_dim]
-        head_dim = C // self.num_heads
-        def reshape_for_attn(t, Ht, Wt):
-            # t: [B, C, Ht, Wt] -> [B, heads, Ht*Wt, head_dim]
-            t = t.view(B, self.num_heads, head_dim, Ht * Wt).permute(0,1,3,2)
-            return t
-
-        q_flat = reshape_for_attn(q, H, W)             # [B, h, S_q, d]
-        k_flat = reshape_for_attn(k, k.shape[-2], k.shape[-1])  # [B, h, S_k, d]
-        v_flat = reshape_for_attn(v, k.shape[-2], k.shape[-1])  # [B, h, S_k, d]
-
-        # scaled dot product: [B, h, S_q, S_k]
-        scale = 1.0 / math.sqrt(head_dim)
-        attn_logits = torch.matmul(q_flat, k_flat.transpose(-2, -1)) * scale
-        attn = torch.softmax(attn_logits, dim=-1)
-
-        # output: [B, h, S_q, d]
-        out = torch.matmul(attn, v_flat)
-
-        # merge heads back: [B, C, H, W]
-        out = out.permute(0,1,3,2).contiguous().view(B, C, H, W)
-        out = self.out_proj(out)
-        return out
+        x_flat = x.view(B, C, H * W).transpose(1, 2)  # -> [B, HW, C]
+        x_attn, _ = self.attn(x_flat, x_flat, x_flat) # self-attention
+        return x_attn.transpose(1, 2).view(B, C, H, W)
 
 
 def gradient_loss(pred, target):
@@ -437,152 +429,183 @@ def my_pearsonr(x, y, eps=1e-8):
     r_den = torch.sqrt(torch.sum(xm ** 2) * torch.sum(ym ** 2) + eps)
 
     return r_num / r_den
-# --- Cross-Attention Block ---
-class CrossAttentionBlockPooledKV(nn.Module):
-    def __init__(self, q_channels, kv_channels, num_heads=4, reduction=2, kv_pool_factor=4):
-        """
-        kv_pool_factor: downsample factor for encoder keys/values to save memory.
-        """
-        super().__init__()
-        self.num_heads = num_heads
-        self.kv_pool_factor = kv_pool_factor
-        self.d_model = q_channels // reduction
 
-        # Linear projections
-        self.q_proj = nn.Conv2d(q_channels, self.d_model, kernel_size=1)
-        self.k_proj = nn.Conv2d(kv_channels, self.d_model, kernel_size=1)
-        self.v_proj = nn.Conv2d(kv_channels, self.d_model, kernel_size=1)
+   
+import torch
+import torch.nn.functional as F
 
-        self.attn = nn.MultiheadAttention(self.d_model, num_heads, batch_first=True)
-        self.out_proj = nn.Conv2d(self.d_model, q_channels, kernel_size=1)
+def pearson_loss(pred, target, eps=1e-8):
+    """
+    pred, target: [B, 1, H, W]
+    Computes 1 - Pearson correlation (mean over batch)
+    """
+    B = pred.shape[0]
+    pred = pred.reshape(B, -1)
+    target = target.reshape(B, -1)
 
-    def forward(self, q_feat, kv_feat):
-        B, Cq, H, W = q_feat.shape
-        _, Ckv, Hk, Wk = kv_feat.shape
+    # zero-mean + variance normalize
+    pred = pred - pred.mean(dim=1, keepdim=True)
+    target = target - target.mean(dim=1, keepdim=True)
 
-        # Downsample K/V to reduce memory
-        if self.kv_pool_factor > 1:
-            Hk_new, Wk_new = max(1, Hk // self.kv_pool_factor), max(1, Wk // self.kv_pool_factor)
-            kv_feat = F.adaptive_avg_pool2d(kv_feat, (Hk_new, Wk_new))
-            Hk, Wk = kv_feat.shape[-2], kv_feat.shape[-1]
+    pred = pred / (pred.norm(dim=1, keepdim=True) + eps)
+    target = target / (target.norm(dim=1, keepdim=True) + eps)
 
-        # Project
-        Q = self.q_proj(q_feat)   # [B, d_model, H, W]
-        K = self.k_proj(kv_feat)  # [B, d_model, Hk, Wk]
-        V = self.v_proj(kv_feat)
+    r = F.cosine_similarity(pred, target, dim=1)  # [B]
+    return 1 - r.mean()
 
-        # Flatten to sequence: [B, seq_len, d_model]
-        Q = Q.flatten(2).transpose(1, 2)  # [B, H*W, d_model]
-        K = K.flatten(2).transpose(1, 2)  # [B, Hk*Wk, d_model]
-        V = V.flatten(2).transpose(1, 2)
-
-        # Scaled dot-product attention
-        attn_out, _ = self.attn(Q, K, V)  # [B, H*W, d_model]
-
-        # Reshape back to spatial
-        attn_out = attn_out.transpose(1, 2).view(B, self.d_model, H, W)
-        out = self.out_proj(attn_out)
-
-        # Residual
-        return q_feat + out
-
-# --- Your Main Net with Multi-Scale Supervision and Cross-Attention ---
 class main_net(nn.Module):
-    def __init__(self, in_channels=1, base_channels=32, out_channels=3, use_cross_attention=True):
+    def __init__(self, in_channels=1, out_channels=3, base_channels=32,
+                 use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4,
+                 use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='avg', err_L1=1, err_Multi=0,err_Pear=0,err_SSIM=0,err_Grad=0,err_Power=0,suffix=''):
         super().__init__()
-        self.use_cross_attention = use_cross_attention
-        self.idd = idd
+        arg_dict = locals()
+        for arg in arg_dict:
+            if arg in ['self','__class__','arg_dict','text','data']:
+                continue
+            if type(arg_dict[arg]) == str:
+                text = arg_dict[arg]
+                data = torch.tensor(list(text.encode("utf-8")), dtype=torch.uint8)
+            else:
+                data = torch.tensor(arg_dict[arg])
+            self.register_buffer(arg,data)
 
-        # Example encoder
-        self.enc1 = nn.Conv2d(in_channels, base_channels, 3, padding=1)
-        self.enc2 = nn.Conv2d(base_channels, base_channels * 2, 3, padding=1)
-        self.enc3 = nn.Conv2d(base_channels * 2, base_channels * 4, 3, padding=1)
+        #raise
+        #self.use_fc_bottleneck = use_fc_bottleneck
+        #self.use_cross_attention = use_cross_attention
 
-        # Example decoder
-        self.dec3 = nn.Conv2d(base_channels * 4, base_channels * 2, 3, padding=1)
-        self.dec2 = nn.Conv2d(base_channels * 2, base_channels, 3, padding=1)
+        # Encoder
+        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type)
+        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type)
+        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type)
+        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type)
+        self.pool = nn.MaxPool2d(2)
 
-        # Cross-attention fusion block
+        # Optional FC bottleneck
+        if use_fc_bottleneck:
+            self.fc1 = nn.Linear(base_channels*8*fc_spatial*fc_spatial, fc_hidden)
+            self.fc2 = nn.Linear(fc_hidden, base_channels*8*fc_spatial*fc_spatial)
+
+        # Learned upsampling via ConvTranspose2d
+        self.up4 = nn.ConvTranspose2d(base_channels*8, base_channels*8, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.up3 = nn.ConvTranspose2d(base_channels*4, base_channels*4, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
+
+        # Decoder with skip connections
+        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type)
+        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, pool_type=pool_type)
+        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type)
+        self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
+
+        # --- Multi-scale output heads ---
+        self.out_d4 = nn.Conv2d(base_channels*4, out_channels, 3, padding=1)
+        self.out_d3 = nn.Conv2d(base_channels*2, out_channels, 3, padding=1)
+        self.out_d2 = nn.Conv2d(base_channels,   out_channels, 3, padding=1)
+
+        # Optional cross-attention
         if use_cross_attention:
-            self.cross_attn = CrossAttentionBlockPooledKV(
-                q_channels=base_channels,   # decoder output channels
-                kv_channels=base_channels * 4,  # encoder skip (e3) channels
-                num_heads=2,
-                reduction=2
-            )
+            self.cross_attn = CrossAttention(out_channels, num_heads=attn_heads)
 
-        # Output heads for multi-scale supervision
-        self.out_head_main = nn.Conv2d(base_channels, out_channels, 1)
-        self.out_head_aux2 = nn.Conv2d(base_channels * 2, out_channels, 1)
-        self.out_head_aux3 = nn.Conv2d(base_channels * 4, out_channels, 1)
         self.register_buffer("train_curve", torch.zeros(epochs))
         self.register_buffer("val_curve", torch.zeros(epochs))
+        self.loss_weights = nn.Parameter(torch.tensor([1.0, 0.5, 0.25, 0.125, 1,1,1,1], dtype=torch.float32))
+
 
     def forward(self, x):
         if x.ndim == 3:
             x = x.unsqueeze(1)
 
-        # --- Encoder ---
-        e1 = F.relu(self.enc1(x))
-        e2 = F.relu(self.enc2(F.max_pool2d(e1, 2)))
-        e3 = F.relu(self.enc3(F.max_pool2d(e2, 2)))
+        # Encoder
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        e3 = self.enc3(self.pool(e2))
+        e4 = self.enc4(self.pool(e3))
 
-        # --- Decoder ---
-        d3 = F.interpolate(e3, scale_factor=2, mode="bilinear", align_corners=False)
-        d3 = F.relu(self.dec3(d3))
-        d2 = F.interpolate(d3, scale_factor=2, mode="bilinear", align_corners=False)
-        d2 = F.relu(self.dec2(d2))
+        # Optional FC bottleneck
+        if self.use_fc_bottleneck:
+            B, C, H, W = e4.shape
+            z = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial)).view(B, -1)
+            z = F.relu(self.fc1(z))
+            z = F.relu(self.fc2(z))
+            e4 = F.interpolate(z.view(B, C, self.fc_spatial, self.fc_spatial),
+                               size=(H, W), mode='bilinear', align_corners=False)
 
-        # --- Cross-Attention Fusion ---
+        # Decoder
+        d4 = self.up4(e4)
+        d4 = torch.cat([d4, e3], dim=1)
+        d4 = self.dec4(d4)
+
+        d3 = self.up3(d4)
+        d3 = torch.cat([d3, e2], dim=1)
+        d3 = self.dec3(d3)
+
+        d2 = self.up2(d3)
+        d2 = torch.cat([d2, e1], dim=1)
+        d2 = self.dec2(d2)
+
+        out_main = self.dec1(d2)
+
+        # Multi-scale predictions
+        out_d4 = self.out_d4(d4)
+        out_d3 = self.out_d3(d3)
+        out_d2 = self.out_d2(d2)
+
         if self.use_cross_attention:
-            d2 = self.cross_attn(d2, e3)
+            out_main = self.cross_attn(out_main)
 
-        # --- Multi-Scale Outputs ---
-        out_main = self.out_head_main(d2)
-        out_aux2 = self.out_head_aux2(d3)
-        out_aux3 = self.out_head_aux3(e3)
+        return out_main, out_d2, out_d3, out_d4
 
-        return out_main, out_aux2, out_aux3
 
     def criterion1(self, preds, target):
         """
         preds: tuple of (out_main, out_d2, out_d3, out_d4)
         target: [B, C, H, W] ground truth
         """
-        out_main, out_d2, out_d3  = preds
+        out_main, out_d2, out_d3, out_d4 = preds
+        all_loss = {}
 
         # Downsample target to match each prediction
-        t_d2 = F.interpolate(target, size=out_d2.shape[-2:], mode="bilinear", align_corners=False)
-        t_d3 = F.interpolate(target, size=out_d3.shape[-2:], mode="bilinear", align_corners=False)
-        #t_d4 = F.interpolate(target, size=out_d4.shape[-2:], mode="bilinear", align_corners=False)
+        if self.err_L1>0:
+            loss_main = F.l1_loss(out_main, target)
+            all_loss['L1_0']=self.err_L1*loss_main
+        if self.err_Multi>0:
+            t_d2 = F.interpolate(target, size=out_d2.shape[-2:], mode="bilinear", align_corners=False)
+            t_d3 = F.interpolate(target, size=out_d3.shape[-2:], mode="bilinear", align_corners=False)
+            t_d4 = F.interpolate(target, size=out_d4.shape[-2:], mode="bilinear", align_corners=False)
 
-        loss_main = F.l1_loss(out_main, target)
-        loss_d2   = F.l1_loss(out_d2, t_d2)
-        loss_d3   = F.l1_loss(out_d3, t_d3)
-        #loss_d4   = F.l1_loss(out_d4, t_d4)
+            loss_d2   = F.l1_loss(out_d2, t_d2)
+            loss_d3   = F.l1_loss(out_d3, t_d3)
+            loss_d4   = F.l1_loss(out_d4, t_d4)
+            loss_multi = self.err_Multi*(loss_d2+loss_d3+loss_d4)
+            all_loss['L1_Multi'] = loss_multi
 
         # Weighted sum (more weight on full-res output)
-        ssim_t  = ssim_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-        ssim_e  = ssim_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-        ssim_b  = ssim_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-        grad_t  = gradient_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-        grad_e  = gradient_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-        grad_b  = gradient_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-        pear_t  = 1-my_pearsonr(out_main[:,0:1,:,:].flatten(), target[:,0:1,:,:].flatten())
-        pear_e  = 1-my_pearsonr(out_main[:,1:2,:,:].flatten(), target[:,1:2,:,:].flatten())
-        pear_b  = 1-my_pearsonr(out_main[:,2:3,:,:].flatten(), target[:,2:3,:,:].flatten())
-        lambda_pear = 1.0*(pear_e+pear_b+pear_t)
+        if self.err_SSIM > 0:
+            ssim_t  = ssim_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
+            ssim_e  = ssim_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
+            ssim_b  = ssim_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
+            lambda_ssim = self.err_SSIM*(ssim_e+ssim_b+ssim_t)/3
+            all_loss['SSIM']=lambda_ssim
+        if self.err_Grad > 0:
+            grad_t  = gradient_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
+            grad_e  = gradient_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
+            grad_b  = gradient_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
+            lambda_grad = self.err_Grad*(grad_e+grad_b+grad_t)/3
+            all_loss['Grad']=lambda_grad
+        if self.err_Pear > 0:
+            pear_t  = pearson_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
+            pear_e  = pearson_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
+            pear_b  = pearson_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
+            lambda_pear = self.err_Pear*(pear_e+pear_b+pear_t)/3
+            all_loss['Pear']=lambda_pear
 
-        lambda_ssim = 1.0*(ssim_e+ssim_b+ssim_t)
-        lambda_grad = 1.0*(grad_e+grad_b+grad_t)
+        if self.err_Power > 0:
+            lambda_power = self.err_Power*power_spectra_crit(out_main, target)
+            all_loss['Power'] = lambda_power
 
-
-        stuff=[loss_main, loss_d2, loss_d3, lambda_ssim, lambda_grad, lambda_pear]
-        out = torch.stack(stuff).to(device)
-        return out
+        return all_loss
 
     def criterion(self, preds, target):
         losses = self.criterion1(preds,target)
-        weights = torch.tensor([1,0.5,0.25,1,1,2]).to(device)
-        return (losses*weights).sum()
+
+        return sum(losses.values())
 

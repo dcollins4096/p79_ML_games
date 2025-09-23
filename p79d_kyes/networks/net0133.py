@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 
 
 
-idd = 130
-what = "cross attention"
+idd = 133
+what = "128 with cross attention"
 
 fname_train = "p79d_subsets_S512_N5_xyz_down_128_2356_x.h5"
 fname_valid = "p79d_subsets_S512_N5_xyz_down_128_4_x.h5"
@@ -38,7 +38,7 @@ epochs  = 200
 #epochs = 20
 lr = 1e-3
 #lr = 1e-4
-batch_size=10
+batch_size=1
 lr_schedule=[100]
 weight_decay = 1e-3
 fc_bottleneck=True
@@ -53,7 +53,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net()
+    model = main_net(base_channels=32, fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -488,33 +488,53 @@ class CrossAttentionBlockPooledKV(nn.Module):
 
 # --- Your Main Net with Multi-Scale Supervision and Cross-Attention ---
 class main_net(nn.Module):
-    def __init__(self, in_channels=1, base_channels=32, out_channels=3, use_cross_attention=True):
+    def __init__(self, in_channels=1, out_channels=3, base_channels=32,
+                 use_fc_bottleneck=False, fc_hidden=512, fc_spatial=4,
+                 use_cross_attention=True, attn_heads=1, epochs=300):
         super().__init__()
+        self.use_fc_bottleneck = use_fc_bottleneck
         self.use_cross_attention = use_cross_attention
-        self.idd = idd
 
-        # Example encoder
-        self.enc1 = nn.Conv2d(in_channels, base_channels, 3, padding=1)
-        self.enc2 = nn.Conv2d(base_channels, base_channels * 2, 3, padding=1)
-        self.enc3 = nn.Conv2d(base_channels * 2, base_channels * 4, 3, padding=1)
+        # Encoder
+        self.enc1 = ResidualBlockSE(in_channels, base_channels)
+        self.enc2 = ResidualBlockSE(base_channels, base_channels*2)
+        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4)
+        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8)
+        self.pool = nn.MaxPool2d(2)
 
-        # Example decoder
-        self.dec3 = nn.Conv2d(base_channels * 4, base_channels * 2, 3, padding=1)
-        self.dec2 = nn.Conv2d(base_channels * 2, base_channels, 3, padding=1)
+        # Optional FC bottleneck
+        if use_fc_bottleneck:
+            self.fc_spatial = fc_spatial
+            self.fc1 = nn.Linear(base_channels*8*fc_spatial*fc_spatial, fc_hidden)
+            self.fc2 = nn.Linear(fc_hidden, base_channels*8*fc_spatial*fc_spatial)
 
+        # Learned upsampling via ConvTranspose2d
+        self.up4 = nn.ConvTranspose2d(base_channels*8, base_channels*8, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.up3 = nn.ConvTranspose2d(base_channels*4, base_channels*4, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
+
+        # Decoder with skip connections
+        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4)
+        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2)
+        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels)
+        self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
+
+        # --- Multi-scale output heads ---
+        self.out_d4 = nn.Conv2d(base_channels*4, out_channels, 3, padding=1)
+        self.out_d3 = nn.Conv2d(base_channels*2, out_channels, 3, padding=1)
+        self.out_d2 = nn.Conv2d(base_channels,   out_channels, 3, padding=1)
+
+        # Optional cross-attention
         # Cross-attention fusion block
         if use_cross_attention:
             self.cross_attn = CrossAttentionBlockPooledKV(
                 q_channels=base_channels,   # decoder output channels
-                kv_channels=base_channels * 4,  # encoder skip (e3) channels
+                kv_channels=base_channels * 8,  # encoder skip (e3) channels
                 num_heads=2,
                 reduction=2
             )
 
-        # Output heads for multi-scale supervision
-        self.out_head_main = nn.Conv2d(base_channels, out_channels, 1)
-        self.out_head_aux2 = nn.Conv2d(base_channels * 2, out_channels, 1)
-        self.out_head_aux3 = nn.Conv2d(base_channels * 4, out_channels, 1)
+
         self.register_buffer("train_curve", torch.zeros(epochs))
         self.register_buffer("val_curve", torch.zeros(epochs))
 
@@ -522,44 +542,64 @@ class main_net(nn.Module):
         if x.ndim == 3:
             x = x.unsqueeze(1)
 
-        # --- Encoder ---
-        e1 = F.relu(self.enc1(x))
-        e2 = F.relu(self.enc2(F.max_pool2d(e1, 2)))
-        e3 = F.relu(self.enc3(F.max_pool2d(e2, 2)))
+        # Encoder
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        e3 = self.enc3(self.pool(e2))
+        e4 = self.enc4(self.pool(e3))
 
-        # --- Decoder ---
-        d3 = F.interpolate(e3, scale_factor=2, mode="bilinear", align_corners=False)
-        d3 = F.relu(self.dec3(d3))
-        d2 = F.interpolate(d3, scale_factor=2, mode="bilinear", align_corners=False)
-        d2 = F.relu(self.dec2(d2))
+        # Optional FC bottleneck
+        if self.use_fc_bottleneck:
+            B, C, H, W = e4.shape
+            z = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial)).view(B, -1)
+            z = F.relu(self.fc1(z))
+            z = F.relu(self.fc2(z))
+            e4 = F.interpolate(z.view(B, C, self.fc_spatial, self.fc_spatial),
+                               size=(H, W), mode='bilinear', align_corners=False)
+
+        # Decoder
+        d4 = self.up4(e4)
+        d4 = torch.cat([d4, e3], dim=1)
+        d4 = self.dec4(d4)
+
+        d3 = self.up3(d4)
+        d3 = torch.cat([d3, e2], dim=1)
+        d3 = self.dec3(d3)
+
+        d2 = self.up2(d3)
+        d2 = torch.cat([d2, e1], dim=1)
+        d2 = self.dec2(d2)
 
         # --- Cross-Attention Fusion ---
         if self.use_cross_attention:
-            d2 = self.cross_attn(d2, e3)
+            d2 = self.cross_attn(d2, e4)
 
-        # --- Multi-Scale Outputs ---
-        out_main = self.out_head_main(d2)
-        out_aux2 = self.out_head_aux2(d3)
-        out_aux3 = self.out_head_aux3(e3)
+        out_main = self.dec1(d2)
 
-        return out_main, out_aux2, out_aux3
+        # Multi-scale predictions
+        out_d4 = self.out_d4(d4)
+        out_d3 = self.out_d3(d3)
+        out_d2 = self.out_d2(d2)
+
+
+        return out_main, out_d2, out_d3, out_d4
 
     def criterion1(self, preds, target):
         """
         preds: tuple of (out_main, out_d2, out_d3, out_d4)
         target: [B, C, H, W] ground truth
         """
-        out_main, out_d2, out_d3  = preds
+        out_main, out_d2, out_d3, out_d4 = preds
 
         # Downsample target to match each prediction
         t_d2 = F.interpolate(target, size=out_d2.shape[-2:], mode="bilinear", align_corners=False)
         t_d3 = F.interpolate(target, size=out_d3.shape[-2:], mode="bilinear", align_corners=False)
-        #t_d4 = F.interpolate(target, size=out_d4.shape[-2:], mode="bilinear", align_corners=False)
+        t_d4 = F.interpolate(target, size=out_d4.shape[-2:], mode="bilinear", align_corners=False)
 
         loss_main = F.l1_loss(out_main, target)
         loss_d2   = F.l1_loss(out_d2, t_d2)
         loss_d3   = F.l1_loss(out_d3, t_d3)
-        #loss_d4   = F.l1_loss(out_d4, t_d4)
+        loss_d4   = F.l1_loss(out_d4, t_d4)
 
         # Weighted sum (more weight on full-res output)
         ssim_t  = ssim_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
@@ -571,18 +611,18 @@ class main_net(nn.Module):
         pear_t  = 1-my_pearsonr(out_main[:,0:1,:,:].flatten(), target[:,0:1,:,:].flatten())
         pear_e  = 1-my_pearsonr(out_main[:,1:2,:,:].flatten(), target[:,1:2,:,:].flatten())
         pear_b  = 1-my_pearsonr(out_main[:,2:3,:,:].flatten(), target[:,2:3,:,:].flatten())
-        lambda_pear = 1.0*(pear_e+pear_b+pear_t)
+        lambda_pear = 2.0*(pear_e+pear_b+pear_t)
 
         lambda_ssim = 1.0*(ssim_e+ssim_b+ssim_t)
         lambda_grad = 1.0*(grad_e+grad_b+grad_t)
 
 
-        stuff=[loss_main, loss_d2, loss_d3, lambda_ssim, lambda_grad, lambda_pear]
+        stuff=[loss_main, loss_d2, loss_d3, loss_d4, lambda_ssim, lambda_grad, lambda_pear]
         out = torch.stack(stuff).to(device)
         return out
 
     def criterion(self, preds, target):
         losses = self.criterion1(preds,target)
-        weights = torch.tensor([1,0.5,0.25,1,1,2]).to(device)
+        weights = torch.tensor([1,0.5,0.25,0.125,1,1,2]).to(device)
         return (losses*weights).sum()
 
