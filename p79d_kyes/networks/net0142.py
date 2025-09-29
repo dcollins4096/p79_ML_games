@@ -20,13 +20,14 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 140
-what = "Switch everything."
+idd = 142
+what = "141 with dropout"
 
 fname_train = "p79d_subsets_S512_N5_xyz_down_128_2356.h5"
 fname_valid = "p79d_subsets_S512_N5_xyz_down_128_4.h5"
 #ntrain = 2000
 ntrain = 1000 #ntrain = 600
+#ntrain = 20
 #ntrain = 3000
 #nvalid=3
 #ntrain = 10
@@ -86,8 +87,11 @@ def downsample_avg(x, M):
 # ---------------------------
 # Dataset with input normalization
 # ---------------------------
+import torchvision.transforms.functional as TF
+import random
 class SphericalDataset(Dataset):
-    def __init__(self, all_data):
+    def __init__(self, all_data, rotation_prob = 0.0):
+        self.rotation_prob = rotation_prob
         if downsample:
             self.all_data=downsample_avg(all_data,downsample)
         else:
@@ -97,7 +101,11 @@ class SphericalDataset(Dataset):
 
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
-        return self.all_data[idx][0], self.all_data[idx]
+        theset = self.all_data[idx]
+        if random.uniform(0,1) < self.rotation_prob:
+            angle = random.uniform(-90,90)
+            theset = TF.rotate(theset,angle)
+        return theset[0], theset
 
 # ---------------------------
 # Utils
@@ -126,8 +134,8 @@ def trainer(
 ):
     set_seed()
 
-    ds_train = SphericalDataset(all_data['train'])
-    ds_val   = SphericalDataset(all_data['valid'])
+    ds_train = SphericalDataset(all_data['train'], rotation_prob=model.rotation_prob)
+    ds_val   = SphericalDataset(all_data['valid'], rotation_prob=model.rotation_prob)
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader   = DataLoader(ds_val,   batch_size=max(64, batch_size), shuffle=False, drop_last=False)
 
@@ -284,12 +292,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ResidualBlockSE(nn.Module):
-    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg"):
+    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
+
+        self.dropout = nn.Dropout2d(p=dropout_p) 
 
         # Skip connection if channel mismatch
         self.proj = None
@@ -322,6 +332,7 @@ class ResidualBlockSE(nn.Module):
     def forward(self, x):
         identity = x
         out = F.relu(self.bn1(self.conv1(x)))
+        out = self.dropout(out)
         out = self.bn2(self.conv2(out))
 
         # --- SE attention pooling ---
@@ -458,8 +469,8 @@ def pearson_loss(pred, target, eps=1e-8):
 
 class main_net(nn.Module):
     def __init__(self, in_channels=1, out_channels=3, base_channels=32,
-                 use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4,
-                 use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='avg', err_L1=1, err_Multi=0,err_Pear=0,err_SSIM=0,err_Grad=0,err_Power=0,suffix=''):
+                 use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
+                 use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='avg', err_L1=1, err_Multi=0,err_Pear=0,err_SSIM=0,err_Grad=0,err_Power=0,suffix='', dropout_1=0, dropout_2=0, dropout_3=0):
         super().__init__()
         arg_dict = locals()
         for arg in arg_dict:
@@ -477,10 +488,10 @@ class main_net(nn.Module):
         #self.use_cross_attention = use_cross_attention
 
         # Encoder
-        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type)
-        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type)
-        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type)
-        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type)
+        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1)
+        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1)
+        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1)
+        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1)
         self.pool = nn.MaxPool2d(2)
 
         # Optional FC bottleneck
@@ -494,9 +505,9 @@ class main_net(nn.Module):
         self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
 
         # Decoder with skip connections
-        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type)
-        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, pool_type=pool_type)
-        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type)
+        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type, dropout_p=dropout_3)
+        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, pool_type=pool_type, dropout_p=dropout_3)
+        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type, dropout_p=dropout_3)
         self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
 
         # --- Multi-scale output heads ---
@@ -528,7 +539,9 @@ class main_net(nn.Module):
             B, C, H, W = e4.shape
             z = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial)).view(B, -1)
             z = F.relu(self.fc1(z))
+            z = F.dropout(z, p=self.dropout_2, training=self.training)
             z = F.relu(self.fc2(z))
+            z = F.dropout(z, p=self.dropout_2, training=self.training)
             e4 = F.interpolate(z.view(B, C, self.fc_spatial, self.fc_spatial),
                                size=(H, W), mode='bilinear', align_corners=False)
 
