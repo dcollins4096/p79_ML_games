@@ -136,6 +136,8 @@ def trainer(
 
     ds_train = SphericalDataset(all_data['train'], rotation_prob=model.rotation_prob)
     ds_val   = SphericalDataset(all_data['valid'], rotation_prob=model.rotation_prob)
+    #ds_train = SphericalDataset(all_data['train'])
+    #ds_val   = SphericalDataset(all_data['valid'])
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader   = DataLoader(ds_val,   batch_size=max(64, batch_size), shuffle=False, drop_last=False)
 
@@ -159,9 +161,9 @@ def trainer(
     t0 = time.time()
     verbose=False
     save_err_Bisp = -1
-    if model.err_Bisp > 0:
-        save_err_Bisp = model.err_Bisp
-        model.err_Bisp = torch.tensor(0.0)
+    #if model.err_Bisp > 0:
+    #    save_err_Bisp = model.err_Bisp
+    #    model.err_Bisp = torch.tensor(0.0)
 
 
     for epoch in range(1, epochs+1):
@@ -497,19 +499,18 @@ class main_net(nn.Module):
                  suffix='', dropout_1=0, dropout_2=0, dropout_3=0):
         super().__init__()
         arg_dict = locals()
-        for arg in arg_dict:
-            if arg in ['self','__class__','arg_dict','text','data']:
-                continue
-            if type(arg_dict[arg]) == str:
-                text = arg_dict[arg]
-                data = torch.tensor(list(text.encode("utf-8")), dtype=torch.uint8)
-            else:
-                data = torch.tensor(arg_dict[arg])
-            self.register_buffer(arg,data)
-
-        #raise
-        #self.use_fc_bottleneck = use_fc_bottleneck
-        #self.use_cross_attention = use_cross_attention
+        self.use_fc_bottleneck = use_fc_bottleneck
+        self.fc_spatial = fc_spatial
+        self.dropout_2=dropout_2
+        self.use_cross_attention=use_cross_attention
+        self.err_L1=err_L1
+        self.err_Multi=err_Multi
+        self.err_Pear=err_Pear
+        self.err_SSIM=err_SSIM
+        self.err_Grad=err_Grad
+        self.err_Power=err_Power
+        self.err_Bisp=err_Bisp
+        self.rotation_prob = rotation_prob
 
         # Encoder
         self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1)
