@@ -20,15 +20,15 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 149
-what = "148 but train on first half, test on second half"
+idd = 155
+what = "148 not periodic, also rotated data"
 
-fname_train = "p79d_subsets_S512_N5_xyz_down_12823456_first.h5"
-fname_valid = "p79d_subsets_S512_N5_xyz_down_12823456_second.h5"
+fname_train = "p79d_subsets_S256_N10_xyz_down_128_rot23456_second.h5"
+fname_valid = "p79d_subsets_S256_N10_xyz_down_128_rot23456_first.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 3000
+ntrain = 5000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -39,7 +39,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 epochs = 200
 lr = 1e-3
 #lr = 1e-4
-batch_size=10 
+batch_size=64   
 lr_schedule=[100]
 weight_decay = 1e-3
 fc_bottleneck=True

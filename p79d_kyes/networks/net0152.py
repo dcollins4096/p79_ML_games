@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 149
-what = "148 but train on first half, test on second half"
+idd = 152
+what = "149, weight decay lower"
 
 fname_train = "p79d_subsets_S512_N5_xyz_down_12823456_first.h5"
 fname_valid = "p79d_subsets_S512_N5_xyz_down_12823456_second.h5"
@@ -41,7 +41,7 @@ lr = 1e-3
 #lr = 1e-4
 batch_size=10 
 lr_schedule=[100]
-weight_decay = 1e-3
+weight_decay = 1e-5
 fc_bottleneck=True
 def load_data():
 
@@ -167,8 +167,7 @@ def trainer(
 
 
     for epoch in range(1, epochs+1):
-        if epoch > 50 and save_err_Bisp>0:
-            model.err_Bisp = save_err_Bisp
+
         model.train()
         if verbose:
             print("Epoch %d"%epoch)
@@ -510,16 +509,6 @@ class main_net(nn.Module):
         self.err_Grad=err_Grad
         self.err_Power=err_Power
         self.err_Bisp=err_Bisp
-        if 0:
-            for arg in arg_dict:
-                if arg in ['self','__class__','arg_dict','text','data']:
-                    continue
-                if type(arg_dict[arg]) == str:
-                    text = arg_dict[arg]
-                    data = torch.tensor(list(text.encode("utf-8")), dtype=torch.uint8)
-                else:
-                    data = torch.tensor(arg_dict[arg])
-                self.register_buffer(arg,data)
 
         #raise
         #self.use_fc_bottleneck = use_fc_bottleneck
