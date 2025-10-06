@@ -20,11 +20,14 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 155
-what = "148 not periodic, also rotated data"
+idd = 157
+what = "155 without rotation"
 
-fname_train = "p79d_subsets_S256_N10_xyz_down_128_rot23456_second.h5"
-fname_valid = "p79d_subsets_S256_N10_xyz_down_128_rot23456_first.h5"
+
+
+
+fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
+fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
@@ -42,12 +45,12 @@ lr = 1e-3
 batch_size=64   
 lr_schedule=[100]
 weight_decay = 1e-3
-fc_bottleneck=True
+fc_bottleneck=False
 def load_data():
 
     print('read the data')
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
-    valid= loader.loader(fname_valid,ntrain=6000, nvalid=nvalid)
+    valid= loader.loader(fname_valid,ntrain=2000, nvalid=nvalid)
     all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'], 'quantities':{}}
     all_data['quantities']['train']=train['quantities']['train']
     all_data['quantities']['valid']=valid['quantities']['valid']
@@ -314,9 +317,6 @@ def error_real_imag(guess,target):
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-
 
 class ResidualBlockSE(nn.Module):
     def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0):

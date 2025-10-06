@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 155
-what = "148 not periodic, also rotated data"
+idd = 158
+what = "155 with rotational equivariant network"
 
 fname_train = "p79d_subsets_S256_N10_xyz_down_128_rot23456_second.h5"
 fname_valid = "p79d_subsets_S256_N10_xyz_down_128_rot23456_first.h5"
@@ -43,11 +43,12 @@ batch_size=64
 lr_schedule=[100]
 weight_decay = 1e-3
 fc_bottleneck=True
+print("NTRAIN",ntrain)
 def load_data():
 
     print('read the data')
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
-    valid= loader.loader(fname_valid,ntrain=6000, nvalid=nvalid)
+    valid= loader.loader(fname_valid,ntrain=5500, nvalid=nvalid)
     all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'], 'quantities':{}}
     all_data['quantities']['train']=train['quantities']['train']
     all_data['quantities']['valid']=valid['quantities']['valid']
@@ -132,6 +133,7 @@ def trainer(
     lr_schedule=[900],
     plot_path=None
 ):
+    print('START TRAINER')
     set_seed()
 
     #ds_train = SphericalDataset(all_data['train'], rotation_prob=model.rotation_prob)
@@ -285,23 +287,29 @@ def power_spectrum_delta(guess,target):
     return output
 
 def power_spectra_crit(guess,target):
+
     err_T = power_spectrum_delta(guess[:,0:1,:,:], target[:,0:1,:,:])
     err_E = power_spectrum_delta(guess[:,1:2,:,:], target[:,1:2,:,:])
-    err_B = power_spectrum_delta(guess[:,2:3,:,:], target[:,2:3,:,:])
+    err_B=0
+    if len(guess) == 3:
+        err_B = power_spectrum_delta(guess[:,2:3,:,:], target[:,2:3,:,:])
     return err_T+err_E+err_B
 
 import bispectrum
 def bispectrum_crit(guess,target):
     nsamples=100
     T_guess = bispectrum.compute_bispectrum_torch(guess[:,0:1,:,:]  ,nsamples=nsamples)[0]
-    E_guess = bispectrum.compute_bispectrum_torch(guess[:,0:1,:,:]  ,nsamples=nsamples)[0]
-    B_guess = bispectrum.compute_bispectrum_torch(guess[:,0:1,:,:]  ,nsamples=nsamples)[0]
     T_target = bispectrum.compute_bispectrum_torch(target[:,0:1,:,:],nsamples=nsamples)[0]
-    E_target = bispectrum.compute_bispectrum_torch(target[:,0:1,:,:],nsamples=nsamples)[0]
-    B_target = bispectrum.compute_bispectrum_torch(target[:,0:1,:,:],nsamples=nsamples)[0]
     dT = torch.mean(torch.abs(torch.log(torch.abs( T_guess / T_target))))
+
+    E_guess = bispectrum.compute_bispectrum_torch(guess[:,1:2,:,:]  ,nsamples=nsamples)[0]
+    E_target = bispectrum.compute_bispectrum_torch(target[:,1:2,:,:],nsamples=nsamples)[0]
     dE = torch.mean(torch.abs(torch.log(torch.abs( E_guess / E_target))))
-    dB = torch.mean(torch.abs(torch.log(torch.abs( B_guess / B_target))))
+    dB = 0
+    if len(guess)==3:
+        B_guess = bispectrum.compute_bispectrum_torch(guess[:,2:3,:,:]  ,nsamples=nsamples)[0]
+        B_target = bispectrum.compute_bispectrum_torch(target[:,2:3,:,:],nsamples=nsamples)[0]
+        dB = torch.mean(torch.abs(torch.log(torch.abs( B_guess / B_target))))
     #pdb.set_trace()
     return dT+dE+dB
 
@@ -314,79 +322,64 @@ def error_real_imag(guess,target):
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch
+import torch.nn as nn
+from e2cnn import gspaces
+from e2cnn import nn as enn
 
-
-
-
-class ResidualBlockSE(nn.Module):
-    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0):
+# -------------------------------------------------
+#  Residual Squeeze–Excitation Block (E(2)-equivariant)
+# -------------------------------------------------
+class ResidualBlockSE_E2(nn.Module):
+    def __init__(self, r2_act, in_type, out_channels, kernel_size=3, reduction=16, dropout_p=0.0):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.r2_act = r2_act
+        self.in_type = in_type
+        self.out_type = enn.FieldType(r2_act, out_channels * [r2_act.regular_repr])
 
-        self.dropout = nn.Dropout2d(p=dropout_p) 
+        self.block = enn.SequentialModule(
+            enn.R2Conv(in_type, self.out_type, kernel_size=kernel_size, padding=1, bias=False),
+            enn.InnerBatchNorm(self.out_type),
+            enn.ReLU(self.out_type, inplace=True),
+            enn.R2Conv(self.out_type, self.out_type, kernel_size=kernel_size, padding=1, bias=False),
+            enn.InnerBatchNorm(self.out_type),
+        )
 
-        # Skip connection if channel mismatch
-        self.proj = None
-        if in_channels != out_channels:
-            self.proj = nn.Conv2d(in_channels, out_channels, 1)
-
-        # --- Pooling variants ---
-        self.pool_type = pool_type
-        if pool_type == "avg":
-            self.pool = nn.AdaptiveAvgPool2d(1)
-        elif pool_type == "max":
-            self.pool = nn.AdaptiveMaxPool2d(1)
-        elif pool_type == "avgmax":
-            # Concatenate avg + max → doubles channels for fc1
-            self.pool_avg = nn.AdaptiveAvgPool2d(1)
-            self.pool_max = nn.AdaptiveMaxPool2d(1)
-        elif pool_type == "learned":
-            # 1x1 conv to learn pooling weights (H×W → 1)
-            self.pool = nn.Conv2d(out_channels, 1, kernel_size=1)
-
-        # --- SE MLP ---
-        if pool_type == "avgmax":
-            se_in = 2 * out_channels
+        # 1x1 skip conv if shape changes
+        if in_type != self.out_type:
+            self.skip = enn.R2Conv(in_type, self.out_type, kernel_size=1, bias=False)
         else:
-            se_in = out_channels
+            self.skip = None
 
-        self.fc1 = nn.Linear(se_in, out_channels // reduction)
-        self.fc2 = nn.Linear(out_channels // reduction, out_channels)
+        # SE
+        self.out_type = self.out_type  # or whatever your last conv’s out_type is
+        c = self.out_type.size          # number of feature channels (representation components)
+
+        self.fc1 = nn.Conv2d(c, c // 4, 1, bias=True)
+        self.fc2 = nn.Conv2d(c // 4, c, 1, bias=True)
+        #self.fc1 = nn.Conv2d(out_channels, out_channels // reduction, 1)
+        #self.fc2 = nn.Conv2d(out_channels // reduction, out_channels, 1)
+        self.relu = enn.ReLU(self.out_type, inplace=True)
+        self.dropout = nn.Dropout2d(p=dropout_p)
 
     def forward(self, x):
         identity = x
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.dropout(out)
-        out = self.bn2(self.conv2(out))
+        out = self.block(x)
+        if self.skip is not None:
+            identity = self.skip(identity)
+        out = out + identity
+        out = self.relu(out)
 
-        # --- SE attention pooling ---
-        if self.pool_type == "avg":
-            w = self.pool(out).view(out.size(0), -1)
-        elif self.pool_type == "max":
-            w = self.pool(out).view(out.size(0), -1)
-        elif self.pool_type == "avgmax":
-            w_avg = self.pool_avg(out).view(out.size(0), -1)
-            w_max = self.pool_max(out).view(out.size(0), -1)
-            w = torch.cat([w_avg, w_max], dim=1)
-        elif self.pool_type == "learned":
-            # Apply learned 1x1 conv → softmax over spatial dims
-            weights = F.softmax(self.pool(out).view(out.size(0), -1), dim=1)
-            w = torch.sum(out.view(out.size(0), out.size(1), -1) * weights.unsqueeze(1), dim=-1)
+        # Squeeze–Excitation (on tensor level)
+        t = out.tensor
+        w = t.mean(dim=(2, 3), keepdim=True)
+        w = torch.relu(self.fc1(w))
+        w = torch.sigmoid(self.fc2(w))
+        t = t * w
+        out = enn.GeometricTensor(t, out.type)
 
-        # --- SE excitation ---
-        w = F.relu(self.fc1(w))
-        w = torch.sigmoid(self.fc2(w)).view(out.size(0), out.size(1), 1, 1)
-        out = out * w
-
-        # Skip connection
-        if self.proj is not None:
-            identity = self.proj(identity)
-        out += identity
-        return F.relu(out)
-
+        out.tensor = self.dropout(out.tensor)
+        return out
 
 def ssim_loss(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
     """
@@ -494,14 +487,25 @@ def pearson_loss(pred, target, eps=1e-8):
     r = F.cosine_similarity(pred, target, dim=1)  # [B]
     return 1 - r.mean()
 
+
+
+
+
+# -------------------------------------------------
+#  Full U-Net with skip connections and spin-2 output
+# -------------------------------------------------
+#from e2cnn.group import cached_basisexpansions
+#cached_basisexpansions.set_cache_dir("./e2cnn_basis_cache")
+#cached_basisexpansions.set_cache_mode("disk")
 class main_net(nn.Module):
-    def __init__(self, in_channels=1, out_channels=3, base_channels=32,
+    def __init__(self, in_channels=1, out_channels=2, base_channels=16,
                  use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
                  use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='max', 
-                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=1,
-                 suffix='', dropout_1=0, dropout_2=0, dropout_3=0):
+                 err_L1=1, err_Multi=0,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=1,
+                 suffix='', dropout_1=0, dropout_2=0, dropout_3=0, N=4):
         super().__init__()
-        arg_dict = locals()
+        print('dork')
+        self.r2_act = gspaces.Rot2dOnR2(N=N)
         self.use_fc_bottleneck = use_fc_bottleneck
         self.fc_spatial = fc_spatial
         self.dropout_2=dropout_2
@@ -513,113 +517,104 @@ class main_net(nn.Module):
         self.err_Grad=err_Grad
         self.err_Power=err_Power
         self.err_Bisp=err_Bisp
-        if 0:
-            for arg in arg_dict:
-                if arg in ['self','__class__','arg_dict','text','data']:
-                    continue
-                if type(arg_dict[arg]) == str:
-                    text = arg_dict[arg]
-                    data = torch.tensor(list(text.encode("utf-8")), dtype=torch.uint8)
-                else:
-                    data = torch.tensor(arg_dict[arg])
-                self.register_buffer(arg,data)
 
-        #raise
-        #self.use_fc_bottleneck = use_fc_bottleneck
-        #self.use_cross_attention = use_cross_attention
+        # Spin-0 input (scalar)
+        print('dork1')
+        in_type = enn.FieldType(self.r2_act, in_channels * [self.r2_act.trivial_repr])
 
         # Encoder
-        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1)
-        self.pool = nn.MaxPool2d(2)
+        self.enc1 = ResidualBlockSE_E2(self.r2_act, in_type, base_channels, dropout_p=dropout_1)
+        self.pool1 = enn.PointwiseAvgPoolAntialiased(self.enc1.out_type, sigma=0.66, stride=2)
+        print('dork2')
 
-        # Optional FC bottleneck
-        if use_fc_bottleneck:
-            self.fc1 = nn.Linear(base_channels*8*fc_spatial*fc_spatial, fc_hidden)
-            self.fc2 = nn.Linear(fc_hidden, base_channels*8*fc_spatial*fc_spatial)
+        self.enc2 = ResidualBlockSE_E2(self.r2_act, self.enc1.out_type, base_channels * 2, dropout_p=dropout_1)
+        print('dork2.1')
+        self.pool2 = enn.PointwiseAvgPoolAntialiased(self.enc2.out_type, sigma=0.66, stride=2)
+        print('dork2.2')
 
-        # Learned upsampling via ConvTranspose2d
-        self.up4 = nn.ConvTranspose2d(base_channels*8, base_channels*8, kernel_size=3, stride=2, padding=1, output_padding=1)
-        self.up3 = nn.ConvTranspose2d(base_channels*4, base_channels*4, kernel_size=3, stride=2, padding=1, output_padding=1)
-        self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
+        self.enc3 = ResidualBlockSE_E2(self.r2_act, self.enc2.out_type, base_channels * 4, dropout_p=dropout_1)
+        print('dork2.3')
+        self.pool3 = enn.PointwiseAvgPoolAntialiased(self.enc3.out_type, sigma=0.66, stride=2)
+        print('dork3')
 
-        # Decoder with skip connections
-        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type, dropout_p=dropout_3)
-        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, pool_type=pool_type, dropout_p=dropout_3)
-        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type, dropout_p=dropout_3)
-        self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
+        self.enc4 = ResidualBlockSE_E2(self.r2_act, self.enc3.out_type, base_channels * 8, dropout_p=dropout_1)
+        print('dork3.1')
+        self.pool4 = enn.PointwiseAvgPoolAntialiased(self.enc4.out_type, sigma=0.66, stride=2)
+        print('dork3.2')
 
-        # --- Multi-scale output heads ---
-        self.out_d4 = nn.Conv2d(base_channels*4, out_channels, 3, padding=1)
-        self.out_d3 = nn.Conv2d(base_channels*2, out_channels, 3, padding=1)
-        self.out_d2 = nn.Conv2d(base_channels,   out_channels, 3, padding=1)
+        # Bottleneck
+        self.bottleneck = ResidualBlockSE_E2(self.r2_act, self.enc4.out_type, base_channels * 8, dropout_p=dropout_2)
+        print('dork4')
 
-        # Optional cross-attention
-        if use_cross_attention:
-            self.cross_attn = CrossAttention(out_channels, num_heads=attn_heads)
+        # Decoder (with skip connections)
+        self.up4 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.dec4 = ResidualBlockSE_E2(self.r2_act, self.bottleneck.out_type, base_channels * 8, dropout_p=dropout_3)
 
+        self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.dec3 = ResidualBlockSE_E2(self.r2_act, self.dec4.out_type, base_channels * 4, dropout_p=dropout_3)
+
+        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.dec2 = ResidualBlockSE_E2(self.r2_act, self.dec3.out_type, base_channels * 2, dropout_p=dropout_3)
+
+        self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.dec1 = ResidualBlockSE_E2(self.r2_act, self.dec2.out_type, base_channels, dropout_p=dropout_3)
+        print('dork5')
+
+        # Final spin-2 output
+        spin2_repr = self.r2_act.irrep(2)
+        out_type = enn.FieldType(self.r2_act, out_channels * [spin2_repr])
+        self.out_conv = enn.R2Conv(self.dec1.out_type, out_type, kernel_size=3, padding=1)
+        print('finished')
         self.register_buffer("train_curve", torch.zeros(epochs))
         self.register_buffer("val_curve", torch.zeros(epochs))
-        self.loss_weights = nn.Parameter(torch.tensor([1.0, 0.5, 0.25, 0.125, 1,1,1,1], dtype=torch.float32))
-
 
     def forward(self, x):
         if x.ndim == 3:
             x = x.unsqueeze(1)
+        x = enn.GeometricTensor(x, self.enc1.in_type)
 
-        # Encoder
+        # --- Encoder ---
         e1 = self.enc1(x)
-        e2 = self.enc2(self.pool(e1))
-        e3 = self.enc3(self.pool(e2))
-        e4 = self.enc4(self.pool(e3))
+        e2 = self.enc2(self.pool1(e1))
+        e3 = self.enc3(self.pool2(e2))
+        e4 = self.enc4(self.pool3(e3))
+        b = self.bottleneck(self.pool4(e4))
 
-        # Optional FC bottleneck
-        if self.use_fc_bottleneck:
-            B, C, H, W = e4.shape
-            z = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial)).view(B, -1)
-            z = F.relu(self.fc1(z))
-            z = F.dropout(z, p=self.dropout_2, training=self.training)
-            z = F.relu(self.fc2(z))
-            z = F.dropout(z, p=self.dropout_2, training=self.training)
-            e4 = F.interpolate(z.view(B, C, self.fc_spatial, self.fc_spatial),
-                               size=(H, W), mode='bilinear', align_corners=False)
+        # --- Decoder with skip connections ---
+        d4 = self.dec4(enn.GeometricTensor(self.up4(b.tensor), self.dec4.in_type))
+        d4.tensor = d4.tensor + e4.tensor  # skip connection (sum)
+        d3 = self.dec3(enn.GeometricTensor(self.up3(d4.tensor), self.dec3.in_type))
+        d3.tensor = d3.tensor + e3.tensor
+        d2 = self.dec2(enn.GeometricTensor(self.up2(d3.tensor), self.dec2.in_type))
+        d2.tensor = d2.tensor + e2.tensor
+        d1 = self.dec1(enn.GeometricTensor(self.up1(d2.tensor), self.dec1.in_type))
+        d1.tensor = d1.tensor + e1.tensor
 
-        # Decoder
-        d4 = self.up4(e4)
-        d4 = torch.cat([d4, e3], dim=1)
-        d4 = self.dec4(d4)
+        out = self.out_conv(d1)
+        return out.tensor,
 
-        d3 = self.up3(d4)
-        d3 = torch.cat([d3, e2], dim=1)
-        d3 = self.dec3(d3)
-
-        d2 = self.up2(d3)
-        d2 = torch.cat([d2, e1], dim=1)
-        d2 = self.dec2(d2)
-
-        out_main = self.dec1(d2)
-
-        # Multi-scale predictions
-        out_d4 = self.out_d4(d4)
-        out_d3 = self.out_d3(d3)
-        out_d2 = self.out_d2(d2)
-
-        if self.use_cross_attention:
-            out_main = self.cross_attn(out_main)
-
-        return out_main, out_d2, out_d3, out_d4
-
-
-    def criterion1(self, preds, target):
+    def criterion1(self, preds, target1):
         """
         preds: tuple of (out_main, out_d2, out_d3, out_d4)
         target: [B, C, H, W] ground truth
         """
-        out_main, out_d2, out_d3, out_d4 = preds
         all_loss = {}
 
+        if len(preds) == 4:
+            out_main, out_d2, out_d3, out_d4 = preds
+        else:
+            out_main = preds[0]
+        if out_main.shape[1] == 3:
+            do_t=True
+        elif out_main.shape[1] == 2:
+            do_t=False
+        else:
+            print('problem')
+            pdb.set_trace()
+        if do_t:
+            target=target1
+        else:
+            target = target1[:,1:,:,:]
         # Downsample target to match each prediction
         if self.err_L1>0:
             loss_main = F.l1_loss(out_main, target)
@@ -639,19 +634,26 @@ class main_net(nn.Module):
         if self.err_SSIM > 0:
             ssim_t  = ssim_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
             ssim_e  = ssim_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            ssim_b  = ssim_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
+            ssim_b=0
+            if do_t:
+                ssim_b  = ssim_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
+
             lambda_ssim = self.err_SSIM*(ssim_e+ssim_b+ssim_t)/3
             all_loss['SSIM']=lambda_ssim
         if self.err_Grad > 0:
             grad_t  = gradient_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
             grad_e  = gradient_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            grad_b  = gradient_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
+            grad_b=0
+            if do_t:
+                grad_b  = gradient_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
             lambda_grad = self.err_Grad*(grad_e+grad_b+grad_t)/3
             all_loss['Grad']=lambda_grad
         if self.err_Pear > 0:
             pear_t  = pearson_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
             pear_e  = pearson_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            pear_b  = pearson_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
+            pear_b=0
+            if do_t:
+                pear_b  = pearson_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
             lambda_pear = self.err_Pear*(pear_e+pear_b+pear_t)/3
             all_loss['Pear']=lambda_pear
         if self.err_Power > 0:
