@@ -18,10 +18,13 @@ import pdb
 import loader
 from scipy.ndimage import gaussian_filter
 import torch_power
+from escnn import gspaces
+from escnn import nn as enn
+# Optionally, specify a custom cache path
 
 
-idd = 159
-what = "158 without the rotation"
+idd = 161
+what = "Equivariant, take 3"
 
 fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -39,7 +42,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 epochs = 200
 lr = 1e-3
 #lr = 1e-4
-batch_size=64   
+batch_size=32
 lr_schedule=[100]
 weight_decay = 1e-3
 fc_bottleneck=True
@@ -319,67 +322,7 @@ def error_real_imag(guess,target):
     L1 += F.l1_loss(guess.imag, target.imag)
     return L1
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch
-import torch.nn as nn
-from e2cnn import gspaces
-from e2cnn import nn as enn
 
-# -------------------------------------------------
-#  Residual Squeeze–Excitation Block (E(2)-equivariant)
-# -------------------------------------------------
-class ResidualBlockSE_E2(nn.Module):
-    def __init__(self, r2_act, in_type, out_channels, kernel_size=3, reduction=16, dropout_p=0.0):
-        super().__init__()
-        self.r2_act = r2_act
-        self.in_type = in_type
-        self.out_type = enn.FieldType(r2_act, out_channels * [r2_act.regular_repr])
-
-        self.block = enn.SequentialModule(
-            enn.R2Conv(in_type, self.out_type, kernel_size=kernel_size, padding=1, bias=False),
-            enn.InnerBatchNorm(self.out_type),
-            enn.ReLU(self.out_type, inplace=True),
-            enn.R2Conv(self.out_type, self.out_type, kernel_size=kernel_size, padding=1, bias=False),
-            enn.InnerBatchNorm(self.out_type),
-        )
-
-        # 1x1 skip conv if shape changes
-        if in_type != self.out_type:
-            self.skip = enn.R2Conv(in_type, self.out_type, kernel_size=1, bias=False)
-        else:
-            self.skip = None
-
-        # SE
-        self.out_type = self.out_type  # or whatever your last conv’s out_type is
-        c = self.out_type.size          # number of feature channels (representation components)
-
-        self.fc1 = nn.Conv2d(c, c // 4, 1, bias=True)
-        self.fc2 = nn.Conv2d(c // 4, c, 1, bias=True)
-        #self.fc1 = nn.Conv2d(out_channels, out_channels // reduction, 1)
-        #self.fc2 = nn.Conv2d(out_channels // reduction, out_channels, 1)
-        self.relu = enn.ReLU(self.out_type, inplace=True)
-        self.dropout = nn.Dropout2d(p=dropout_p)
-
-    def forward(self, x):
-        identity = x
-        out = self.block(x)
-        if self.skip is not None:
-            identity = self.skip(identity)
-        out = out + identity
-        out = self.relu(out)
-
-        # Squeeze–Excitation (on tensor level)
-        t = out.tensor
-        w = t.mean(dim=(2, 3), keepdim=True)
-        w = torch.relu(self.fc1(w))
-        w = torch.sigmoid(self.fc2(w))
-        t = t * w
-        out = enn.GeometricTensor(t, out.type)
-
-        out.tensor = self.dropout(out.tensor)
-        return out
 
 def ssim_loss(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
     """
@@ -416,19 +359,6 @@ def ssim_loss(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
 
     return 1 - ssim_map.mean()  # SSIM loss
 
-class CrossAttention(nn.Module):
-    def __init__(self, channels, num_heads=4):
-        super().__init__()
-        self.attn = nn.MultiheadAttention(channels, num_heads, batch_first=True)
-
-    def forward(self, x):
-        """
-        x: [B, C, H, W]
-        """
-        B, C, H, W = x.shape
-        x_flat = x.view(B, C, H * W).transpose(1, 2)  # -> [B, HW, C]
-        x_attn, _ = self.attn(x_flat, x_flat, x_flat) # self-attention
-        return x_attn.transpose(1, 2).view(B, C, H, W)
 
 
 def gradient_loss(pred, target):
@@ -465,8 +395,6 @@ def my_pearsonr(x, y, eps=1e-8):
     return r_num / r_den
 
    
-import torch
-import torch.nn.functional as F
 
 def pearson_loss(pred, target, eps=1e-8):
     """
@@ -487,29 +415,79 @@ def pearson_loss(pred, target, eps=1e-8):
     r = F.cosine_similarity(pred, target, dim=1)  # [B]
     return 1 - r.mean()
 
-
-
-
-
 # -------------------------------------------------
-#  Full U-Net with skip connections and spin-2 output
+#  Residual Squeeze–Excitation Block (E(2)-equivariant)
 # -------------------------------------------------
-#from e2cnn.group import cached_basisexpansions
-#cached_basisexpansions.set_cache_dir("./e2cnn_basis_cache")
-#cached_basisexpansions.set_cache_mode("disk")
-class main_net(nn.Module):
-    def __init__(self, in_channels=1, out_channels=2, base_channels=16,
-                 use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
-                 use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='max', 
-                 err_L1=1, err_Multi=0,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=1,
-                 suffix='', dropout_1=0, dropout_2=0, dropout_3=0, N=4):
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from escnn import gspaces
+from escnn import nn as enn
+
+class ResidualBlockSE_ESCNN(nn.Module):
+    def __init__(self, in_type, out_type, dropout_p=0.0, use_se=False, reduction=16):
         super().__init__()
-        print('dork')
-        self.r2_act = gspaces.Rot2dOnR2(N=N)
-        self.use_fc_bottleneck = use_fc_bottleneck
-        self.fc_spatial = fc_spatial
-        self.dropout_2=dropout_2
-        self.use_cross_attention=use_cross_attention
+        self.in_type = in_type
+        self.out_type = out_type
+        self.use_se = use_se
+
+        self.conv1 = enn.R2Conv(in_type, out_type, kernel_size=3, padding=1, bias=False)
+        self.bn1 = enn.InnerBatchNorm(out_type)
+        self.relu1 = enn.ReLU(out_type, inplace=True)
+        self.conv2 = enn.R2Conv(out_type, out_type, kernel_size=3, padding=1, bias=False)
+        self.bn2 = enn.InnerBatchNorm(out_type)
+        self.relu2 = enn.ReLU(out_type, inplace=True)
+
+        if in_type != out_type:
+            self.skip = enn.R2Conv(in_type, out_type, kernel_size=1, bias=False)
+        else:
+            self.skip = None
+
+        self.dropout = nn.Dropout2d(p=dropout_p)
+
+        if use_se:
+            # For SE, we apply gating on scalar magnitudes per “field”
+            # We must know how many fields / channels in out_type
+            self.num_channels = out_type.size
+            hidden = max(4, self.num_channels // reduction)
+            self.se_fc1 = nn.Linear(self.num_channels, hidden)
+            self.se_fc2 = nn.Linear(hidden, self.num_channels)
+
+    def forward(self, x: enn.GeometricTensor):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu1(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        if self.skip is not None:
+            identity = self.skip(identity)
+
+        out = enn.GeometricTensor(out.tensor + identity.tensor, out.type)
+        out = self.relu2(out)
+
+        if self.use_se:
+            t = out.tensor  # shape [B, C, H, W]
+            w = t.mean(dim=(2,3))  # shape [B, C]
+            w = F.relu(self.se_fc1(w))
+            w = torch.sigmoid(self.se_fc2(w)).unsqueeze(-1).unsqueeze(-1)
+            t = t * w
+            out = enn.GeometricTensor(t, out.type)
+
+        out.tensor = self.dropout(out.tensor)
+        return out
+
+
+class main_net(nn.Module):
+    def __init__( self, in_channels=1, out_channels=2, base_channels=16,
+                 use_se=False, dropout_1=0.0, dropout_2=0.0, dropout_3=0.0,
+                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=1, 
+                 suffix='', N=4):
+        super().__init__()
         self.err_L1=err_L1
         self.err_Multi=err_Multi
         self.err_Pear=err_Pear
@@ -517,81 +495,101 @@ class main_net(nn.Module):
         self.err_Grad=err_Grad
         self.err_Power=err_Power
         self.err_Bisp=err_Bisp
+        self.r2_act = gspaces.rot2dOnR2(N)  # C_N rotations + reflections if desired
 
-        # Spin-0 input (scalar)
-        print('dork1')
+        # input FieldType: scalar
         in_type = enn.FieldType(self.r2_act, in_channels * [self.r2_act.trivial_repr])
 
+        # helper to get hidden field types
+        def field(factor):
+            return enn.FieldType(self.r2_act, factor * [self.r2_act.regular_repr])
+
         # Encoder
-        self.enc1 = ResidualBlockSE_E2(self.r2_act, in_type, base_channels, dropout_p=dropout_1)
-        self.pool1 = enn.PointwiseAvgPoolAntialiased(self.enc1.out_type, sigma=0.66, stride=2)
-        print('dork2')
+        print('init1')
+        self.enc1 = ResidualBlockSE_ESCNN(in_type, field(base_channels), dropout_p=dropout_1, use_se=use_se)
+        self.pool1 = enn.PointwiseMaxPool(self.enc1.out_type, kernel_size=2, stride=2)  # or PointwiseAvgPool
 
-        self.enc2 = ResidualBlockSE_E2(self.r2_act, self.enc1.out_type, base_channels * 2, dropout_p=dropout_1)
-        print('dork2.1')
-        self.pool2 = enn.PointwiseAvgPoolAntialiased(self.enc2.out_type, sigma=0.66, stride=2)
-        print('dork2.2')
+        print('init2')
+        self.enc2 = ResidualBlockSE_ESCNN(self.enc1.out_type, field(base_channels*2), dropout_p=dropout_1, use_se=use_se)
+        self.pool2 = enn.PointwiseMaxPool(self.enc2.out_type, kernel_size=2, stride=2)
 
-        self.enc3 = ResidualBlockSE_E2(self.r2_act, self.enc2.out_type, base_channels * 4, dropout_p=dropout_1)
-        print('dork2.3')
-        self.pool3 = enn.PointwiseAvgPoolAntialiased(self.enc3.out_type, sigma=0.66, stride=2)
-        print('dork3')
+        print('init3')
+        self.enc3 = ResidualBlockSE_ESCNN(self.enc2.out_type, field(base_channels*4), dropout_p=dropout_1, use_se=use_se)
+        self.pool3 = enn.PointwiseMaxPool(self.enc3.out_type, kernel_size=2, stride=2)
 
-        self.enc4 = ResidualBlockSE_E2(self.r2_act, self.enc3.out_type, base_channels * 8, dropout_p=dropout_1)
-        print('dork3.1')
-        self.pool4 = enn.PointwiseAvgPoolAntialiased(self.enc4.out_type, sigma=0.66, stride=2)
-        print('dork3.2')
+        print('init3')
+        self.enc4 = ResidualBlockSE_ESCNN(self.enc3.out_type, field(base_channels*8), dropout_p=dropout_1, use_se=use_se)
+        self.pool4 = enn.PointwiseMaxPool(self.enc4.out_type, kernel_size=2, stride=2)
 
         # Bottleneck
-        self.bottleneck = ResidualBlockSE_E2(self.r2_act, self.enc4.out_type, base_channels * 8, dropout_p=dropout_2)
-        print('dork4')
+        print('init4')
+        self.bottleneck = ResidualBlockSE_ESCNN(self.enc4.out_type, field(base_channels*8), dropout_p=dropout_2, use_se=use_se)
 
-        # Decoder (with skip connections)
-        self.up4 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.dec4 = ResidualBlockSE_E2(self.r2_act, self.bottleneck.out_type, base_channels * 8, dropout_p=dropout_3)
+        # Decoder (upsample + skip)
+        print('init5')
+        self.up = enn.R2Upsampling(self.bottleneck.out_type, scale_factor=2)
+        self.dec4 = ResidualBlockSE_ESCNN(self.bottleneck.out_type, field(base_channels*8), dropout_p=dropout_3, use_se=use_se)
+        self.up3 = enn.R2Upsampling(self.dec4.out_type, scale_factor=2)
+        print('init5')
+        self.dec3 = ResidualBlockSE_ESCNN(self.dec4.out_type, field(base_channels*4), dropout_p=dropout_3, use_se=use_se)
+        self.up2 = enn.R2Upsampling(self.dec3.out_type, scale_factor=2)
+        print('init6')
+        self.dec2 = ResidualBlockSE_ESCNN(self.dec3.out_type, field(base_channels*2), dropout_p=dropout_3, use_se=use_se)
+        self.up1 = enn.R2Upsampling(self.dec2.out_type, scale_factor=2)
+        print('init7')
+        self.dec1 = ResidualBlockSE_ESCNN(self.dec2.out_type, field(base_channels), dropout_p=dropout_3, use_se=use_se)
 
-        self.up3 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.dec3 = ResidualBlockSE_E2(self.r2_act, self.dec4.out_type, base_channels * 4, dropout_p=dropout_3)
-
-        self.up2 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.dec2 = ResidualBlockSE_E2(self.r2_act, self.dec3.out_type, base_channels * 2, dropout_p=dropout_3)
-
-        self.up1 = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
-        self.dec1 = ResidualBlockSE_E2(self.r2_act, self.dec2.out_type, base_channels, dropout_p=dropout_3)
-        print('dork5')
-
-        # Final spin-2 output
-        spin2_repr = self.r2_act.irrep(2)
-        out_type = enn.FieldType(self.r2_act, out_channels * [spin2_repr])
-        self.out_conv = enn.R2Conv(self.dec1.out_type, out_type, kernel_size=3, padding=1)
-        print('finished')
+        # Output heads mapping to spin-2
+        spin2 = self.r2_act.irrep(2)  # pick the spin-2 irrep
+        out_type = enn.FieldType(self.r2_act, out_channels * [spin2])
+        self.out_main = enn.R2Conv(self.dec1.out_type, out_type, kernel_size=3, padding=1, bias=True)
+        self.out_d2 = enn.R2Conv(self.dec2.out_type, out_type, kernel_size=3, padding=1, bias=True)
+        self.out_d3 = enn.R2Conv(self.dec3.out_type, out_type, kernel_size=3, padding=1, bias=True)
+        self.out_d4 = enn.R2Conv(self.dec4.out_type, out_type, kernel_size=3, padding=1, bias=True)
         self.register_buffer("train_curve", torch.zeros(epochs))
         self.register_buffer("val_curve", torch.zeros(epochs))
 
     def forward(self, x):
         if x.ndim == 3:
-            x = x.unsqueeze(1)
+            x = x.unsqueeze(1)  # (B, 1, H, W)
         x = enn.GeometricTensor(x, self.enc1.in_type)
 
-        # --- Encoder ---
         e1 = self.enc1(x)
-        e2 = self.enc2(self.pool1(e1))
-        e3 = self.enc3(self.pool2(e2))
-        e4 = self.enc4(self.pool3(e3))
-        b = self.bottleneck(self.pool4(e4))
+        p1 = self.pool1(e1)
+        e2 = self.enc2(p1)
+        p2 = self.pool2(e2)
+        e3 = self.enc3(p2)
+        p3 = self.pool3(e3)
+        e4 = self.enc4(p3)
+        p4 = self.pool4(e4)
 
-        # --- Decoder with skip connections ---
-        d4 = self.dec4(enn.GeometricTensor(self.up4(b.tensor), self.dec4.in_type))
-        d4.tensor = d4.tensor + e4.tensor  # skip connection (sum)
-        d3 = self.dec3(enn.GeometricTensor(self.up3(d4.tensor), self.dec3.in_type))
-        d3.tensor = d3.tensor + e3.tensor
-        d2 = self.dec2(enn.GeometricTensor(self.up2(d3.tensor), self.dec2.in_type))
-        d2.tensor = d2.tensor + e2.tensor
-        d1 = self.dec1(enn.GeometricTensor(self.up1(d2.tensor), self.dec1.in_type))
-        d1.tensor = d1.tensor + e1.tensor
+        b = self.bottleneck(p4)
 
-        out = self.out_conv(d1)
-        return out.tensor,
+        d4 = self.dec4(self.up(b))
+        e4_t = e4.transform_to(d4.type) if e4.type != d4.type else e4
+        d4 = enn.GeometricTensor(d4.tensor + e4_t.tensor, d4.type)
+
+        d3 = self.dec3(self.up3(d4))
+        e3_t = e3.transform_to(d3.type) if e3.type != d3.type else e3
+        d3 = enn.GeometricTensor(d3.tensor + e3_t.tensor, d3.type)
+
+        d2 = self.dec2(self.up2(d3))
+        e2_t = e2.transform_to(d2.type) if e2.type != d2.type else e2
+        d2 = enn.GeometricTensor(d2.tensor + e2_t.tensor, d2.type)
+
+        d1 = self.dec1(self.up1(d2))
+        e1_t = e1.transform_to(d1.type) if e1.type != d1.type else e1
+        d1 = enn.GeometricTensor(d1.tensor + e1_t.tensor, d1.type)
+
+        out_main = self.out_main(d1).tensor
+        out_d2 = self.out_d2(d2).tensor
+        out_d3 = self.out_d3(d3).tensor
+        out_d4 = self.out_d4(d4).tensor
+
+        return out_main, out_d2, out_d3, out_d4
+
+
+
 
     def criterion1(self, preds, target1):
         """
