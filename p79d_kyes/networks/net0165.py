@@ -23,8 +23,8 @@ from escnn import nn as enn
 # Optionally, specify a custom cache path
 
 
-idd = 163
-what = "Equivariant, memorize"
+idd = 165
+what = "Equivariant, memorize with SE"
 
 fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -42,9 +42,9 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 epochs = 2000
 lr = 1e-3
 #lr = 1e-4
-batch_size=64
-lr_schedule=[100]
-weight_decay = 1e-3
+batch_size=10
+lr_schedule=[10000]
+weight_decay = 0
 fc_bottleneck=True
 print("NTRAIN",ntrain)
 def load_data():
@@ -426,7 +426,7 @@ from escnn import gspaces
 from escnn import nn as enn
 
 class ResidualBlockSE_ESCNN(nn.Module):
-    def __init__(self, in_type, out_type, dropout_p=0.0, use_se=False, reduction=16):
+    def __init__(self, in_type, out_type, dropout_p=0.0, use_se=True, reduction=16):
         super().__init__()
         self.in_type = in_type
         self.out_type = out_type
@@ -611,6 +611,10 @@ class main_net(nn.Module):
         d1_up = self.up1(d2)
         cat1  = enn.tensor_directsum([d1_up, e1])
         d1    = self.dec1(cat1)
+        assert cat4.type == self.dec4.in_type
+        assert cat3.type == self.dec3.in_type
+        assert cat2.type == self.dec2.in_type
+        assert cat1.type == self.dec1.in_type
 
 
         # ----- Output heads -----
