@@ -23,15 +23,15 @@ from escnn import nn as enn
 # Optionally, specify a custom cache path
 
 
-idd = 162
-what = "Equivariant, take 4"
+idd = 161
+what = "Equivariant, take 3"
 
 fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
 #ntrain = 2000
-#ntrain = 1000 #ntrain = 600
+ntrain = 1000 
 #ntrain = 20
-ntrain = 5000
+#ntrain = 5000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -42,7 +42,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 epochs = 200
 lr = 1e-3
 #lr = 1e-4
-batch_size=32
+batch_size=64
 lr_schedule=[100]
 weight_decay = 1e-3
 fc_bottleneck=True
@@ -482,6 +482,10 @@ class ResidualBlockSE_ESCNN(nn.Module):
         return out
 
 
+def directsum_type(a: enn.FieldType, b: enn.FieldType) -> enn.FieldType:
+    assert a.gspace == b.gspace
+    return enn.FieldType(a.gspace, a.representations + b.representations)
+
 class main_net(nn.Module):
     def __init__( self, in_channels=1, out_channels=2, base_channels=16,
                  use_se=False, dropout_1=0.0, dropout_2=0.0, dropout_3=0.0,
@@ -526,18 +530,39 @@ class main_net(nn.Module):
         self.bottleneck = ResidualBlockSE_ESCNN(self.enc4.out_type, field(base_channels*8), dropout_p=dropout_2, use_se=use_se)
 
         # Decoder (upsample + skip)
+# ----- Decoder -----
+# d4 gets [bottleneck ⊕ enc4]
+        dec4_in_type = directsum_type(self.bottleneck.out_type, self.enc4.out_type)
+        self.dec4 = ResidualBlockSE_ESCNN(dec4_in_type, field(base_channels*8),
+                                          dropout_p=dropout_3, use_se=use_se)
+
+# d3 gets [dec4 ⊕ enc3]
+        dec3_in_type = directsum_type(self.dec4.out_type, self.enc3.out_type)
+        self.dec3 = ResidualBlockSE_ESCNN(dec3_in_type, field(base_channels*4),
+                                          dropout_p=dropout_3, use_se=use_se)
+
+# d2 gets [dec3 ⊕ enc2]
+        dec2_in_type = directsum_type(self.dec3.out_type, self.enc2.out_type)
+        self.dec2 = ResidualBlockSE_ESCNN(dec2_in_type, field(base_channels*2),
+                                          dropout_p=dropout_3, use_se=use_se)
+
+# d1 gets [dec2 ⊕ enc1]
+        dec1_in_type = directsum_type(self.dec2.out_type, self.enc1.out_type)
+        self.dec1 = ResidualBlockSE_ESCNN(dec1_in_type, field(base_channels),
+                                          dropout_p=dropout_3, use_se=use_se)
+
         print('init5')
         self.up = enn.R2Upsampling(self.bottleneck.out_type, scale_factor=2)
-        self.dec4 = ResidualBlockSE_ESCNN(self.bottleneck.out_type, field(base_channels*8), dropout_p=dropout_3, use_se=use_se)
+        #self.dec4 = ResidualBlockSE_ESCNN(self.bottleneck.out_type, field(base_channels*8), dropout_p=dropout_3, use_se=use_se)
         self.up3 = enn.R2Upsampling(self.dec4.out_type, scale_factor=2)
         print('init5')
-        self.dec3 = ResidualBlockSE_ESCNN(self.dec4.out_type, field(base_channels*4), dropout_p=dropout_3, use_se=use_se)
+        #self.dec3 = ResidualBlockSE_ESCNN(self.dec4.out_type, field(base_channels*4), dropout_p=dropout_3, use_se=use_se)
         self.up2 = enn.R2Upsampling(self.dec3.out_type, scale_factor=2)
         print('init6')
-        self.dec2 = ResidualBlockSE_ESCNN(self.dec3.out_type, field(base_channels*2), dropout_p=dropout_3, use_se=use_se)
+        #self.dec2 = ResidualBlockSE_ESCNN(self.dec3.out_type, field(base_channels*2), dropout_p=dropout_3, use_se=use_se)
         self.up1 = enn.R2Upsampling(self.dec2.out_type, scale_factor=2)
         print('init7')
-        self.dec1 = ResidualBlockSE_ESCNN(self.dec2.out_type, field(base_channels), dropout_p=dropout_3, use_se=use_se)
+        #self.dec1 = ResidualBlockSE_ESCNN(self.dec2.out_type, field(base_channels), dropout_p=dropout_3, use_se=use_se)
 
         # Output heads mapping to spin-2
         spin2 = self.r2_act.irrep(2)  # pick the spin-2 irrep
@@ -554,40 +579,47 @@ class main_net(nn.Module):
             x = x.unsqueeze(1)  # (B, 1, H, W)
         x = enn.GeometricTensor(x, self.enc1.in_type)
 
+        # ----- Encoder -----
         e1 = self.enc1(x)
         p1 = self.pool1(e1)
+
         e2 = self.enc2(p1)
         p2 = self.pool2(e2)
+
         e3 = self.enc3(p2)
         p3 = self.pool3(e3)
+
         e4 = self.enc4(p3)
         p4 = self.pool4(e4)
 
+        # ----- Bottleneck -----
         b = self.bottleneck(p4)
 
-        d4 = self.dec4(self.up(b))
-        e4_t = e4.transform_to(d4.type) if e4.type != d4.type else e4
-        d4 = enn.GeometricTensor(d4.tensor + e4_t.tensor, d4.type)
+        # ----- Decoder with concatenation skip connections -----
+        d4_up = self.up(b)
+        cat4  = enn.tensor_directsum([d4_up, e4])   # concat skip
+        d4    = self.dec4(cat4)
 
-        d3 = self.dec3(self.up3(d4))
-        e3_t = e3.transform_to(d3.type) if e3.type != d3.type else e3
-        d3 = enn.GeometricTensor(d3.tensor + e3_t.tensor, d3.type)
+        d3_up = self.up3(d4)
+        cat3  = enn.tensor_directsum([d3_up, e3])
+        d3    = self.dec3(cat3)
 
-        d2 = self.dec2(self.up2(d3))
-        e2_t = e2.transform_to(d2.type) if e2.type != d2.type else e2
-        d2 = enn.GeometricTensor(d2.tensor + e2_t.tensor, d2.type)
+        d2_up = self.up2(d3)
+        cat2  = enn.tensor_directsum([d2_up, e2])
+        d2    = self.dec2(cat2)
 
-        d1 = self.dec1(self.up1(d2))
-        e1_t = e1.transform_to(d1.type) if e1.type != d1.type else e1
-        d1 = enn.GeometricTensor(d1.tensor + e1_t.tensor, d1.type)
+        d1_up = self.up1(d2)
+        cat1  = enn.tensor_directsum([d1_up, e1])
+        d1    = self.dec1(cat1)
 
+
+        # ----- Output heads -----
         out_main = self.out_main(d1).tensor
         out_d2 = self.out_d2(d2).tensor
         out_d3 = self.out_d3(d3).tensor
         out_d4 = self.out_d4(d4).tensor
 
         return out_main, out_d2, out_d3, out_d4
-
 
 
 
