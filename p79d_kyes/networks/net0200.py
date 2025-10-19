@@ -20,20 +20,15 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 182
-what = "181 with planck and capacity"
+idd = 201
+what = "Vision Transformer"
 
-#fname_train = "planck_4000_sets_5_smooth_128_target_half1.h5"
-#fname_valid = "planck_4000_sets_5_smooth_128_target_half0.h5"
-#these work ok!
-#fname_train = "planck_allnorm_500_sets_5_smooth_128_target_half0.h5"
-#fname_valid = "planck_allnorm_500_sets_5_smooth_128_target_half1.h5"
-fname_train = "planck_allnorm_5000_sets_5_smooth_128_target_half0.h5"
-fname_valid = "planck_allnorm_5000_sets_5_smooth_128_target_half1.h5"
+fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
+fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 1000
+ntrain = 3000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -54,15 +49,15 @@ def load_data():
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
     valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
     all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'], 'quantities':{}}
-    #all_data['quantities']['train']=train['quantities']['train']
-    #all_data['quantities']['valid']=valid['quantities']['valid']
-    #all_data['quantities']['test']=valid['quantities']['test']
+    all_data['quantities']['train']=train['quantities']['train']
+    all_data['quantities']['valid']=valid['quantities']['valid']
+    all_data['quantities']['test']=valid['quantities']['test']
     print('done')
     return all_data
 
 def thisnet():
 
-    model = main_net(base_channels=64,fc_hidden=1024 , fc_spatial=16, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
+    model = main_net()
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -339,130 +334,6 @@ def error_real_imag(guess,target):
     L1 += F.l1_loss(guess.imag, target.imag)
     return L1
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class ResidualBlockSE(nn.Module):
-    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-
-        self.dropout = nn.Dropout2d(p=dropout_p) 
-
-        # Skip connection if channel mismatch
-        self.proj = None
-        if in_channels != out_channels:
-            self.proj = nn.Conv2d(in_channels, out_channels, 1)
-
-        # --- Pooling variants ---
-        self.pool_type = pool_type
-        if pool_type == "avg":
-            self.pool = nn.AdaptiveAvgPool2d(1)
-        elif pool_type == "max":
-            self.pool = nn.AdaptiveMaxPool2d(1)
-        elif pool_type == "avgmax":
-            # Concatenate avg + max → doubles channels for fc1
-            self.pool_avg = nn.AdaptiveAvgPool2d(1)
-            self.pool_max = nn.AdaptiveMaxPool2d(1)
-        elif pool_type == "learned":
-            # 1x1 conv to learn pooling weights (H×W → 1)
-            self.pool = nn.Conv2d(out_channels, 1, kernel_size=1)
-
-        # --- SE MLP ---
-        if pool_type == "avgmax":
-            se_in = 2 * out_channels
-        else:
-            se_in = out_channels
-
-        self.fc1 = nn.Linear(se_in, out_channels // reduction)
-        self.fc2 = nn.Linear(out_channels // reduction, out_channels)
-
-    def forward(self, x):
-        identity = x
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.dropout(out)
-        out = self.bn2(self.conv2(out))
-
-        # --- SE attention pooling ---
-        if self.pool_type == "avg":
-            w = self.pool(out).view(out.size(0), -1)
-        elif self.pool_type == "max":
-            w = self.pool(out).view(out.size(0), -1)
-        elif self.pool_type == "avgmax":
-            w_avg = self.pool_avg(out).view(out.size(0), -1)
-            w_max = self.pool_max(out).view(out.size(0), -1)
-            w = torch.cat([w_avg, w_max], dim=1)
-        elif self.pool_type == "learned":
-            # Apply learned 1x1 conv → softmax over spatial dims
-            weights = F.softmax(self.pool(out).view(out.size(0), -1), dim=1)
-            w = torch.sum(out.view(out.size(0), out.size(1), -1) * weights.unsqueeze(1), dim=-1)
-
-        # --- SE excitation ---
-        w = F.relu(self.fc1(w))
-        w = torch.sigmoid(self.fc2(w)).view(out.size(0), out.size(1), 1, 1)
-        out = out * w
-
-        # Skip connection
-        if self.proj is not None:
-            identity = self.proj(identity)
-        out += identity
-        return F.relu(out)
-
-
-def ssim_loss(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
-    """
-    Compute SSIM loss: 1 - SSIM (so that lower is better).
-    pred, target: [B, C, H, W]
-    """
-    # Gaussian kernel for local statistics
-    def gaussian_window(window_size, sigma=1.5):
-        coords = torch.arange(window_size, dtype=torch.float)
-        coords -= window_size // 2
-        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
-        g /= g.sum()
-        return g
-
-    device = pred.device
-    channel = pred.size(1)
-    window = gaussian_window(window_size).to(device)
-    window_2d = (window[:, None] * window[None, :]).unsqueeze(0).unsqueeze(0)
-    window_2d = window_2d.repeat(channel, 1, 1, 1)
-
-    mu_pred = F.conv2d(pred, window_2d, padding=window_size//2, groups=channel)
-    mu_target = F.conv2d(target, window_2d, padding=window_size//2, groups=channel)
-
-    mu_pred_sq = mu_pred.pow(2)
-    mu_target_sq = mu_target.pow(2)
-    mu_pred_target = mu_pred * mu_target
-
-    sigma_pred_sq = F.conv2d(pred * pred, window_2d, padding=window_size//2, groups=channel) - mu_pred_sq
-    sigma_target_sq = F.conv2d(target * target, window_2d, padding=window_size//2, groups=channel) - mu_target_sq
-    sigma_pred_target = F.conv2d(pred * target, window_2d, padding=window_size//2, groups=channel) - mu_pred_target
-
-    ssim_map = ((2 * mu_pred_target + C1) * (2 * sigma_pred_target + C2)) / \
-               ((mu_pred_sq + mu_target_sq + C1) * (sigma_pred_sq + sigma_target_sq + C2))
-
-    return 1 - ssim_map.mean()  # SSIM loss
-
-class CrossAttention(nn.Module):
-    def __init__(self, channels, num_heads=4):
-        super().__init__()
-        self.attn = nn.MultiheadAttention(channels, num_heads, batch_first=True)
-
-    def forward(self, x):
-        """
-        x: [B, C, H, W]
-        """
-        B, C, H, W = x.shape
-        x_flat = x.view(B, C, H * W).transpose(1, 2)  # -> [B, HW, C]
-        x_attn, _ = self.attn(x_flat, x_flat, x_flat) # self-attention
-        return x_attn.transpose(1, 2).view(B, C, H, W)
-
-
 def gradient_loss(pred, target):
     """
     Computes a gradient (edge-aware) loss between pred and target.
@@ -519,182 +390,256 @@ def pearson_loss(pred, target, eps=1e-8):
     r = F.cosine_similarity(pred, target, dim=1)  # [B]
     return 1 - r.mean()
 
-class main_net(nn.Module):
-    def __init__(self, in_channels=1, out_channels=3, base_channels=32,
-                 use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
-                 use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='max', 
-                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=1,
-                 suffix='', dropout_1=0, dropout_2=0, dropout_3=0):
+def ssim_loss(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
+    """
+    Compute SSIM loss: 1 - SSIM (so that lower is better).
+    pred, target: [B, C, H, W]
+    """
+    # Gaussian kernel for local statistics
+    def gaussian_window(window_size, sigma=1.5):
+        coords = torch.arange(window_size, dtype=torch.float)
+        coords -= window_size // 2
+        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+        g /= g.sum()
+        return g
+
+    device = pred.device
+    channel = pred.size(1)
+    window = gaussian_window(window_size).to(device)
+    window_2d = (window[:, None] * window[None, :]).unsqueeze(0).unsqueeze(0)
+    window_2d = window_2d.repeat(channel, 1, 1, 1)
+
+    mu_pred = F.conv2d(pred, window_2d, padding=window_size//2, groups=channel)
+    mu_target = F.conv2d(target, window_2d, padding=window_size//2, groups=channel)
+
+    mu_pred_sq = mu_pred.pow(2)
+    mu_target_sq = mu_target.pow(2)
+    mu_pred_target = mu_pred * mu_target
+
+    sigma_pred_sq = F.conv2d(pred * pred, window_2d, padding=window_size//2, groups=channel) - mu_pred_sq
+    sigma_target_sq = F.conv2d(target * target, window_2d, padding=window_size//2, groups=channel) - mu_target_sq
+    sigma_pred_target = F.conv2d(pred * target, window_2d, padding=window_size//2, groups=channel) - mu_pred_target
+
+    ssim_map = ((2 * mu_pred_target + C1) * (2 * sigma_pred_target + C2)) / \
+               ((mu_pred_sq + mu_target_sq + C1) * (sigma_pred_sq + sigma_target_sq + C2))
+
+    return 1 - ssim_map.mean()  # SSIM loss
+
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# ---- Positional encoding (2D sin-cos) ----
+class PositionalEncoding2D(nn.Module):
+    def __init__(self, dim):
         super().__init__()
-        arg_dict = locals()
-        self.use_fc_bottleneck = use_fc_bottleneck
-        self.fc_spatial = fc_spatial
-        self.dropout_2=dropout_2
-        self.use_cross_attention=use_cross_attention
-        self.err_L1=err_L1
-        self.err_Multi=err_Multi
-        self.err_Pear=err_Pear
-        self.err_SSIM=err_SSIM
-        self.err_Grad=err_Grad
-        self.err_Power=err_Power
-        self.err_Bisp=err_Bisp
-        self.err_Cross=err_Cross
-        self.rotation_prob=rotation_prob
-        if 0:
-            for arg in arg_dict:
-                if arg in ['self','__class__','arg_dict','text','data']:
-                    continue
-                if type(arg_dict[arg]) == str:
-                    text = arg_dict[arg]
-                    data = torch.tensor(list(text.encode("utf-8")), dtype=torch.uint8)
-                else:
-                    data = torch.tensor(arg_dict[arg])
-                self.register_buffer(arg,data)
+        self.dim = dim
+        assert dim % 4 == 0, "positional dim must be divisible by 4"
 
-        #raise
-        #self.use_fc_bottleneck = use_fc_bottleneck
-        #self.use_cross_attention = use_cross_attention
+    def forward(self, h, w, device):
+        d = self.dim // 4
+        y = torch.arange(h, device=device).float()
+        x = torch.arange(w, device=device).float()
+        omega = torch.pow(10000, torch.arange(d, device=device).float() / d)
 
-        # Encoder
-        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1)
-        self.pool = nn.MaxPool2d(2)
+        y = y[:, None] / omega[None, :]
+        x = x[:, None] / omega[None, :]
 
-        # Optional FC bottleneck
-        if use_fc_bottleneck:
-            self.fc1 = nn.Linear(base_channels*8*fc_spatial*fc_spatial, fc_hidden)
-            self.fc2 = nn.Linear(fc_hidden, base_channels*8*fc_spatial*fc_spatial)
+        pe_y = torch.cat([torch.sin(y), torch.cos(y)], dim=1)  # [H, 2d]
+        pe_x = torch.cat([torch.sin(x), torch.cos(x)], dim=1)  # [W, 2d]
 
-        # Learned upsampling via ConvTranspose2d
-        self.up4 = nn.ConvTranspose2d(base_channels*8, base_channels*8, kernel_size=3, stride=2, padding=1, output_padding=1)
-        self.up3 = nn.ConvTranspose2d(base_channels*4, base_channels*4, kernel_size=3, stride=2, padding=1, output_padding=1)
-        self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
+        pe = torch.zeros(h, w, self.dim, device=device)
+        pe[:, :, 0:2*d] = pe_y[:, None, :]
+        pe[:, :, 2*d:4*d] = pe_x[None, :, :]
+        return pe  # [H, W, dim]
 
-        # Decoder with skip connections
-        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type, dropout_p=dropout_3)
-        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, pool_type=pool_type, dropout_p=dropout_3)
-        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type, dropout_p=dropout_3)
-        self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
-
-        # --- Multi-scale output heads ---
-        self.out_d4 = nn.Conv2d(base_channels*4, out_channels, 3, padding=1)
-        self.out_d3 = nn.Conv2d(base_channels*2, out_channels, 3, padding=1)
-        self.out_d2 = nn.Conv2d(base_channels,   out_channels, 3, padding=1)
-
-        # Optional cross-attention
-        if use_cross_attention:
-            self.cross_attn = CrossAttention(out_channels, num_heads=attn_heads)
-
-        self.register_buffer("train_curve", torch.zeros(epochs))
-        self.register_buffer("val_curve", torch.zeros(epochs))
-        self.loss_weights = nn.Parameter(torch.tensor([1.0, 0.5, 0.25, 0.125, 1,1,1,1], dtype=torch.float32))
-
+# ---- Patch embedding ----
+class PatchEmbed(nn.Module):
+    def __init__(self, in_chans=1, embed_dim=256, patch_size=8):
+        super().__init__()
+        self.patch_size = patch_size
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
+        # x: [B, C, H, W] -> tokens [B, N, D]
+        x = self.proj(x)  # [B, D, H/p, W/p]
+        B, D, Hp, Wp = x.shape
+        x = x.flatten(2).transpose(1, 2)  # [B, N, D], N=Hp*Wp
+        return x, (Hp, Wp)
+
+# ---- Transformer encoder block ----
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model=256, nhead=4, mlp_ratio=4.0, drop=0.0, attn_drop=0.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.attn  = nn.MultiheadAttention(d_model, nhead, dropout=attn_drop, batch_first=True)
+        self.norm2 = nn.LayerNorm(d_model)
+        hidden = int(d_model * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, hidden),
+            nn.GELU(),
+            nn.Dropout(drop),
+            nn.Linear(hidden, d_model),
+            nn.Dropout(drop),
+        )
+
+    def forward(self, x):
+        # x: [B, N, D]
+        x = x + self.attn(self.norm1(x), self.norm1(x), self.norm1(x), need_weights=False)[0]
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+# ---- Optional pixel-level self-attention (proper projection around MHA) ----
+class PixelSelfAttention(nn.Module):
+    def __init__(self, in_ch=3, embed_dim=128, nhead=4):
+        super().__init__()
+        self.in_proj  = nn.Conv2d(in_ch, embed_dim, 1)
+        self.norm     = nn.LayerNorm(embed_dim)
+        self.attn     = nn.MultiheadAttention(embed_dim, nhead, batch_first=True)
+        self.out_proj = nn.Conv2d(embed_dim, in_ch, 1)
+
+    def forward(self, x):
+        # x: [B, C, H, W]
+        B, C, H, W = x.shape
+        z = self.in_proj(x)              # [B, D, H, W]
+        z = z.flatten(2).transpose(1, 2) # [B, HW, D]
+        z = self.attn(self.norm(z), self.norm(z), self.norm(z), need_weights=False)[0]
+        z = z.transpose(1, 2).view(B, -1, H, W)  # [B, D, H, W]
+        return self.out_proj(z)          # [B, C, H, W]
+
+# ---- ViT model that matches your main_net interface ----
+class main_net(nn.Module):
+    def __init__(self, in_channels=1, out_channels=3,
+                 img_size=64, patch_size=4,
+                 embed_dim=256, depth=8, num_heads=4, mlp_ratio=4.0,
+                 drop=0.0, attn_drop=0.0,
+                 use_fc_bottleneck=False, fc_hidden=512, fc_spatial=4,  # kept for API compat; unused
+                 rotation_prob=0,
+                 use_cross_attention=False, attn_heads=1,               # kept for API compat
+                 epochs=200, pool_type='max',
+                 err_L1=1, err_Multi=1, err_Pear=1, err_SSIM=1, err_Grad=1, err_Power=1, err_Bisp=0, err_Cross=1,
+                 suffix='', dropout_1=0, dropout_2=0, dropout_3=0):
+
+        super().__init__()
+        # store/forward needed flags
+        self.rotation_prob = rotation_prob
+        self.err_L1=err_L1; self.err_Multi=err_Multi; self.err_Pear=err_Pear
+        self.err_SSIM=err_SSIM; self.err_Grad=err_Grad; self.err_Power=err_Power
+        self.err_Bisp=err_Bisp; self.err_Cross=err_Cross
+
+        # patch & pos
+        self.patch_size = patch_size
+        self.embed = PatchEmbed(in_chans=in_channels, embed_dim=embed_dim, patch_size=patch_size)
+        self.pos2d = PositionalEncoding2D(embed_dim)
+
+        # transformer stack
+        self.blocks = nn.ModuleList([
+            TransformerBlock(d_model=embed_dim, nhead=num_heads, mlp_ratio=mlp_ratio, drop=drop, attn_drop=attn_drop)
+            for _ in range(depth)
+        ])
+        self.norm = nn.LayerNorm(embed_dim)
+
+        # decode back to image
+        # unpatchify path: [B, N, D] -> [B, D, Hp, Wp] -> upsample to [B, D/2, 2Hp, 2Wp] ... -> [B, out, H, W]
+        dec_ch = embed_dim
+        self.unproj = nn.Identity()
+
+        self.up1 = nn.ConvTranspose2d(dec_ch, dec_ch//2, kernel_size=2, stride=2)  # x2
+        self.up2 = nn.ConvTranspose2d(dec_ch//2, dec_ch//4, kernel_size=2, stride=2)  # x4 total
+        self.to_out = nn.Conv2d(dec_ch//4, out_channels, kernel_size=3, padding=1)
+
+        # optional pixel attention after decoding (correctly projected)
+        self.pixel_attn = PixelSelfAttention(in_ch=out_channels, embed_dim=128, nhead=attn_heads) if use_cross_attention else None
+
+        # multi-scale heads (derive from main)
+        self.register_buffer("train_curve", torch.zeros(epochs))
+        self.register_buffer("val_curve", torch.zeros(epochs))
+
+    def forward(self, x):
+        # x: [B, 1, H, W] or [B, H, W]
         if x.ndim == 3:
             x = x.unsqueeze(1)
+        B, C, H, W = x.shape
+        assert H % self.patch_size == 0 and W % self.patch_size == 0, "H and W must be divisible by patch_size"
 
-        # Encoder
-        e1 = self.enc1(x)
-        e2 = self.enc2(self.pool(e1))
-        e3 = self.enc3(self.pool(e2))
-        e4 = self.enc4(self.pool(e3))
+        tokens, (Hp, Wp) = self.embed(x)              # [B, N, D], N=Hp*Wp
+        # add 2D pos enc
+        pe = self.pos2d(Hp, Wp, x.device).view(1, Hp*Wp, -1)  # [1, N, D]
+        tokens = tokens + pe
 
-        # Optional FC bottleneck
-        if self.use_fc_bottleneck:
-            B, C, H, W = e4.shape
-            z = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial)).view(B, -1)
-            z = F.relu(self.fc1(z))
-            z = F.dropout(z, p=self.dropout_2, training=self.training)
-            z = F.relu(self.fc2(z))
-            z = F.dropout(z, p=self.dropout_2, training=self.training)
-            e4 = F.interpolate(z.view(B, C, self.fc_spatial, self.fc_spatial),
-                               size=(H, W), mode='bilinear', align_corners=False)
+        for blk in self.blocks:
+            tokens = blk(tokens)
+        tokens = self.norm(tokens)                    # [B, N, D]
 
-        # Decoder
-        d4 = self.up4(e4)
-        d4 = torch.cat([d4, e3], dim=1)
-        d4 = self.dec4(d4)
+        # unpatchify
+        z = tokens.transpose(1, 2).view(B, -1, Hp, Wp)   # [B, D, Hp, Wp]
+        z = self.up1(z)                                  # [B, D/2, 2Hp, 2Wp]
+        z = F.gelu(z)
+        z = self.up2(z)                                  # [B, D/4, 4Hp, 4Wp] == original if patch_size=8 and Hp=H/8
+        z = F.gelu(z)
+        out_main = self.to_out(z)                        # [B, out, H, W]
 
-        d3 = self.up3(d4)
-        d3 = torch.cat([d3, e2], dim=1)
-        d3 = self.dec3(d3)
+        if self.pixel_attn is not None:
+            out_main = self.pixel_attn(out_main)         # proper attention over pixels
 
-        d2 = self.up2(d3)
-        d2 = torch.cat([d2, e1], dim=1)
-        d2 = self.dec2(d2)
-
-        out_main = self.dec1(d2)
-
-        # Multi-scale predictions
-        out_d4 = self.out_d4(d4)
-        out_d3 = self.out_d3(d3)
-        out_d2 = self.out_d2(d2)
-
-        if self.use_cross_attention:
-            out_main = self.cross_attn(out_main)
+        # multi-scale heads compatible with your criterion
+        out_d2 = F.avg_pool2d(out_main, kernel_size=2, stride=2)  # 1/2
+        out_d3 = F.avg_pool2d(out_main, kernel_size=4, stride=4)  # 1/4
+        out_d4 = F.avg_pool2d(out_main, kernel_size=8, stride=8)  # 1/8
 
         return out_main, out_d2, out_d3, out_d4
 
-
+    # ---- reuse your existing loss code by delegation ----
     def criterion1(self, preds, target):
-        """
-        preds: tuple of (out_main, out_d2, out_d3, out_d4)
-        target: [B, C, H, W] ground truth
-        """
+        # We'll call back into your existing helpers if they’re in scope.
         out_main, out_d2, out_d3, out_d4 = preds
         all_loss = {}
 
-        # Downsample target to match each prediction
         if self.err_L1>0:
-            loss_main = F.l1_loss(out_main, target)
-            all_loss['L1_0']=self.err_L1*loss_main
+            all_loss['L1_0'] = self.err_L1 * F.l1_loss(out_main, target)
+
         if self.err_Multi>0:
             t_d2 = F.interpolate(target, size=out_d2.shape[-2:], mode="bilinear", align_corners=False)
             t_d3 = F.interpolate(target, size=out_d3.shape[-2:], mode="bilinear", align_corners=False)
             t_d4 = F.interpolate(target, size=out_d4.shape[-2:], mode="bilinear", align_corners=False)
+            all_loss['L1_Multi'] = self.err_Multi * (
+                F.l1_loss(out_d2, t_d2) + F.l1_loss(out_d3, t_d3) + F.l1_loss(out_d4, t_d4)
+            )
 
-            loss_d2   = F.l1_loss(out_d2, t_d2)
-            loss_d3   = F.l1_loss(out_d3, t_d3)
-            loss_d4   = F.l1_loss(out_d4, t_d4)
-            loss_multi = self.err_Multi*(loss_d2+loss_d3+loss_d4)
-            all_loss['L1_Multi'] = loss_multi
+        if self.err_SSIM>0:
+            all_loss['SSIM'] = self.err_SSIM * (
+                ssim_loss(out_main[:,0:1], target[:,0:1]) +
+                ssim_loss(out_main[:,1:2], target[:,1:2]) +
+                ssim_loss(out_main[:,2:3], target[:,2:3])
+            ) / 3.0
 
-        # Weighted sum (more weight on full-res output)
-        if self.err_SSIM > 0:
-            ssim_t  = ssim_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-            ssim_e  = ssim_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            ssim_b  = ssim_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            lambda_ssim = self.err_SSIM*(ssim_e+ssim_b+ssim_t)/3
-            all_loss['SSIM']=lambda_ssim
-        if self.err_Grad > 0:
-            grad_t  = gradient_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-            grad_e  = gradient_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            grad_b  = gradient_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            lambda_grad = self.err_Grad*(grad_e+grad_b+grad_t)/3
-            all_loss['Grad']=lambda_grad
-        if self.err_Pear > 0:
-            pear_t  = pearson_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-            pear_e  = pearson_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            pear_b  = pearson_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            lambda_pear = self.err_Pear*(pear_e+pear_b+pear_t)/3
-            all_loss['Pear']=lambda_pear
-        if self.err_Power > 0:
-            lambda_power = self.err_Power*power_spectra_crit(out_main, target)
-            all_loss['Power'] = lambda_power
-        if self.err_Cross > 0:
-            lambda_cross = self.err_Cross*cross_spectra_crit(out_main, target)
-            all_loss['Cross'] = lambda_cross
-        if self.err_Bisp > 0:
-            lambda_bisp = self.err_Bisp*bispectrum_crit(out_main,target)
-            all_loss['Bisp'] = lambda_bisp
+        if self.err_Grad>0:
+            all_loss['Grad'] = self.err_Grad * (
+                gradient_loss(out_main[:,0:1], target[:,0:1]) +
+                gradient_loss(out_main[:,1:2], target[:,1:2]) +
+                gradient_loss(out_main[:,2:3], target[:,2:3])
+            ) / 3.0
+
+        if self.err_Pear>0:
+            all_loss['Pear'] = self.err_Pear * (
+                pearson_loss(out_main[:,0:1], target[:,0:1]) +
+                pearson_loss(out_main[:,1:2], target[:,1:2]) +
+                pearson_loss(out_main[:,2:3], target[:,2:3])
+            ) / 3.0
+
+        if self.err_Power>0:
+            all_loss['Power'] = self.err_Power * power_spectra_crit(out_main, target)
+
+        if self.err_Cross>0:
+            all_loss['Cross'] = self.err_Cross * cross_spectra_crit(out_main, target)
+
+        if self.err_Bisp>0:
+            all_loss['Bisp'] = self.err_Bisp * bispectrum_crit(out_main, target)
 
         return all_loss
 
     def criterion(self, preds, target):
-        losses = self.criterion1(preds,target)
-
+        losses = self.criterion1(preds, target)
         return sum(losses.values())
 

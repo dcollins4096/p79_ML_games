@@ -18,22 +18,19 @@ import pdb
 import loader
 from scipy.ndimage import gaussian_filter
 import torch_power
+import torchvision.transforms.functional as TF
+from torchvision.transforms import InterpolationMode
 
 
-idd = 182
-what = "181 with planck and capacity"
+idd = 188
+what = "186 with a mask on rotation"
 
-#fname_train = "planck_4000_sets_5_smooth_128_target_half1.h5"
-#fname_valid = "planck_4000_sets_5_smooth_128_target_half0.h5"
-#these work ok!
-#fname_train = "planck_allnorm_500_sets_5_smooth_128_target_half0.h5"
-#fname_valid = "planck_allnorm_500_sets_5_smooth_128_target_half1.h5"
-fname_train = "planck_allnorm_5000_sets_5_smooth_128_target_half0.h5"
-fname_valid = "planck_allnorm_5000_sets_5_smooth_128_target_half1.h5"
+fname_train = "p79d_subsets_S256_N5_xyz_down_128suite4_first.h5"
+fname_valid = "p79d_subsets_S256_N5_xyz_down_128suite4_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 1000
+ntrain = 3000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -46,23 +43,23 @@ lr = 1e-3
 #lr = 1e-4
 batch_size=64
 lr_schedule=[100]
-weight_decay = 1e-3
+weight_decay = 1e-2
 fc_bottleneck=True
 def load_data():
 
     print('read the data')
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
-    valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
+    valid= loader.loader(fname_valid,ntrain=17000, nvalid=nvalid)
     all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'], 'quantities':{}}
-    #all_data['quantities']['train']=train['quantities']['train']
-    #all_data['quantities']['valid']=valid['quantities']['valid']
-    #all_data['quantities']['test']=valid['quantities']['test']
+    all_data['quantities']['train']=train['quantities']['train']
+    all_data['quantities']['valid']=valid['quantities']['valid']
+    all_data['quantities']['test']=valid['quantities']['test']
     print('done')
     return all_data
 
 def thisnet():
 
-    model = main_net(base_channels=64,fc_hidden=1024 , fc_spatial=16, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
+    model = main_net(base_channels=64,fc_hidden=1024 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -95,7 +92,7 @@ def downsample_avg(x, M):
 import torchvision.transforms.functional as TF
 import random
 class SphericalDataset(Dataset):
-    def __init__(self, all_data, rotation_prob = 0.0):
+    def __init__(self, all_data, rotation_prob = 0.3):
         self.rotation_prob = rotation_prob
         if downsample:
             self.all_data=downsample_avg(all_data,downsample)
@@ -107,9 +104,12 @@ class SphericalDataset(Dataset):
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
         theset = self.all_data[idx]
-        if random.uniform(0,1) < self.rotation_prob:
+        if random.uniform(0,1) < self.rotation_prob or True:
             angle = random.uniform(-90,90)
             theset = TF.rotate(theset,angle)
+            ones = torch.ones((1, theset.shape[1], theset.shape[2]), device=theset.device, dtype=theset.dtype)
+            valid = TF.rotate(ones, angle, interpolation=InterpolationMode.NEAREST, fill=0)[0]
+            theset[0][valid==0] = torch.nan
         return theset[0], theset
 
 # ---------------------------
@@ -149,11 +149,13 @@ def trainer(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * max(1, len(train_loader))
     print("Total Steps", total_steps)
-    scheduler = optim.lr_scheduler.MultiStepLR(
-        optimizer,
-        milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
-        gamma=0.1             # multiply by gamma each time
-    )
+    if 0:
+        scheduler = optim.lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
+            gamma=0.1             # multiply by gamma each time
+        )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 
     best_val = float("inf")
     best_state = None
@@ -197,6 +199,7 @@ def trainer(
 
             if verbose:
                 print("  steps")
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
 
             running += loss.item() * xb.size(0)
@@ -520,10 +523,10 @@ def pearson_loss(pred, target, eps=1e-8):
     return 1 - r.mean()
 
 class main_net(nn.Module):
-    def __init__(self, in_channels=1, out_channels=3, base_channels=32,
-                 use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
+    def __init__(self, in_channels=2, out_channels=3, base_channels=32,
+                 use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0.3,
                  use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='max', 
-                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=1,
+                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=0,
                  suffix='', dropout_1=0, dropout_2=0, dropout_3=0):
         super().__init__()
         arg_dict = locals()
@@ -595,6 +598,12 @@ class main_net(nn.Module):
     def forward(self, x):
         if x.ndim == 3:
             x = x.unsqueeze(1)
+        mask = torch.isfinite(x)
+        unmask = torch.isnan(x)
+        x = torch.nan_to_num(x, nan=0.0)
+        mask_single = mask.any(dim=1, keepdim=True).float()
+        x = torch.cat([x, mask_single], dim=1)
+
 
         # Encoder
         e1 = self.enc1(x)

@@ -20,16 +20,11 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 182
-what = "181 with planck and capacity"
+idd = 185
+what = "180 with capacity"
 
-#fname_train = "planck_4000_sets_5_smooth_128_target_half1.h5"
-#fname_valid = "planck_4000_sets_5_smooth_128_target_half0.h5"
-#these work ok!
-#fname_train = "planck_allnorm_500_sets_5_smooth_128_target_half0.h5"
-#fname_valid = "planck_allnorm_500_sets_5_smooth_128_target_half1.h5"
-fname_train = "planck_allnorm_5000_sets_5_smooth_128_target_half0.h5"
-fname_valid = "planck_allnorm_5000_sets_5_smooth_128_target_half1.h5"
+fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
+fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
@@ -54,15 +49,15 @@ def load_data():
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
     valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
     all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'], 'quantities':{}}
-    #all_data['quantities']['train']=train['quantities']['train']
-    #all_data['quantities']['valid']=valid['quantities']['valid']
-    #all_data['quantities']['test']=valid['quantities']['test']
+    all_data['quantities']['train']=train['quantities']['train']
+    all_data['quantities']['valid']=valid['quantities']['valid']
+    all_data['quantities']['test']=valid['quantities']['test']
     print('done')
     return all_data
 
 def thisnet():
 
-    model = main_net(base_channels=64,fc_hidden=1024 , fc_spatial=16, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
+    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -183,7 +178,7 @@ def trainer(
             optimizer.zero_grad(set_to_none=True)
             if verbose:
                 print("  model")
-            if 1:
+            with torch.cuda.amp.autocast(enabled=True):
                 preds = model(xb)
                 if verbose:
                     print("  crit")
