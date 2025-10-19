@@ -29,8 +29,8 @@ fname_train = "p79d_subsets_S256_N5_xyz_down_128suite4_first.h5"
 fname_valid = "p79d_subsets_S256_N5_xyz_down_128suite4_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
-#ntrain = 20
-ntrain = 3000
+ntrain = 20
+ntrain = 500
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -92,12 +92,13 @@ def downsample_avg(x, M):
 import torchvision.transforms.functional as TF
 import random
 class SphericalDataset(Dataset):
-    def __init__(self, all_data, rotation_prob = 0.3):
+    def __init__(self, all_data, rotation_prob = 0.3, fill = torch.nan):
         self.rotation_prob = rotation_prob
         if downsample:
             self.all_data=downsample_avg(all_data,downsample)
         else:
             self.all_data=all_data
+        self.fill=fill
     def __len__(self):
         return self.all_data.size(0)
 
@@ -109,7 +110,7 @@ class SphericalDataset(Dataset):
             theset = TF.rotate(theset,angle)
             ones = torch.ones((1, theset.shape[1], theset.shape[2]), device=theset.device, dtype=theset.dtype)
             valid = TF.rotate(ones, angle, interpolation=InterpolationMode.NEAREST, fill=0)[0]
-            theset[0][valid==0] = torch.nan
+            theset[0][valid==0] = self.fill
         return theset[0], theset
 
 # ---------------------------
@@ -526,7 +527,7 @@ class main_net(nn.Module):
     def __init__(self, in_channels=2, out_channels=3, base_channels=32,
                  use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0.3,
                  use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='max', 
-                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=0,
+                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=0,err_Mask=1,
                  suffix='', dropout_1=0, dropout_2=0, dropout_3=0):
         super().__init__()
         arg_dict = locals()
@@ -542,6 +543,7 @@ class main_net(nn.Module):
         self.err_Power=err_Power
         self.err_Bisp=err_Bisp
         self.err_Cross=err_Cross
+        self.err_Mask=err_Mask
         self.rotation_prob=rotation_prob
         if 0:
             for arg in arg_dict:
@@ -653,6 +655,12 @@ class main_net(nn.Module):
         preds: tuple of (out_main, out_d2, out_d3, out_d4)
         target: [B, C, H, W] ground truth
         """
+        mask = torch.isfinite(target)
+        unmask = torch.isnan(target)
+        target = torch.nan_to_num(target, nan=0.0)
+        if 0:
+            mask_single = mask.any(dim=1, keepdim=True).float()
+            x = torch.cat([x, mask_single], dim=1)
         out_main, out_d2, out_d3, out_d4 = preds
         all_loss = {}
 
@@ -699,6 +707,13 @@ class main_net(nn.Module):
         if self.err_Bisp > 0:
             lambda_bisp = self.err_Bisp*bispectrum_crit(out_main,target)
             all_loss['Bisp'] = lambda_bisp
+        if self.err_Mask>0:
+            loss_mask =  torch.abs((out_main[:,0,:,:]*unmask[:,0,:,:])).sum()
+            loss_mask+=  torch.abs((out_main[:,1,:,:]*unmask[:,0,:,:])).sum()
+            loss_mask+=  torch.abs((out_main[:,2,:,:]*unmask[:,0,:,:])).sum()
+            loss_mask /= out_main[:,0,:,:].numel()
+
+            all_loss['Mask'] = self.err_Mask*loss_mask
 
         return all_loss
 
