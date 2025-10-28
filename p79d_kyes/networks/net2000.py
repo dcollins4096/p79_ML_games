@@ -43,7 +43,7 @@ epochs = 200
 lr = 1e-3
 #lr = 1e-4
 batch_size=64
-lr_schedule=[100]
+lr_schedule=[400]
 weight_decay = 1e-3
 fc_bottleneck=True
 def load_data():
@@ -94,6 +94,11 @@ class SphericalDataset(Dataset):
             self.all_data=downsample_avg(all_data,downsample)
         else:
             self.all_data=all_data
+        #normalize E&B
+        ebmean = self.all_data[:,1:,...].mean()
+        ebstd  = self.all_data[:,1:,...].std()
+
+        self.all_data[:,1:,...] = (self.all_data[:,1:,...]-ebmean)/ebstd
     def __len__(self):
         return self.all_data.size(0)
 
@@ -181,7 +186,7 @@ def trainer(
             if verbose:
                 print("  model")
             if 1:
-                preds = model(xb)
+                preds = model(xb, return_features=True)
                 if verbose:
                     print("  crit")
 
@@ -211,7 +216,7 @@ def trainer(
             for xb, yb in val_loader:
                 xb = xb.to(device)
                 yb = yb.to(device)
-                preds = model(xb)
+                preds = model(xb, return_features=True)
                 #vloss = model.criterion(preds, yb[:,0:1,:,:])
                 vloss = model.criterion(preds, yb)
                 vtotal += vloss.item() * xb.size(0)
@@ -404,6 +409,7 @@ class EBFlowHead(nn.Module):
         if mode == "train":
             y = target.permute(0, 2, 3, 1).reshape(-1, 2)
             log_prob = self.flow.log_prob(y, context=context)
+            #log_prob = self.flow.log_prob(y)
             return -log_prob.mean()
         elif mode == "sample":
             n = B * H * W
@@ -588,7 +594,7 @@ class main_net(nn.Module):
         self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
 
         # --- Probability distribution output head
-        self.flow_head = EBFlowHead(base_channels, hidden_features=128, num_layers=5)
+        self.flow_head = EBFlowHead(base_channels, hidden_features=256, num_layers=8)
 
 
         # Optional cross-attention
@@ -597,7 +603,7 @@ class main_net(nn.Module):
 
 
 
-    def forward(self, x):
+    def forward(self, x, return_features=False):
         if x.ndim == 3:
             x = x.unsqueeze(1)
 
@@ -637,7 +643,7 @@ class main_net(nn.Module):
         if self.use_cross_attention:
             out_main = self.cross_attn(out_main)
 
-        if self.training:
+        if self.training or return_features:
             # Expect target passed separately in criterion
             return out_main, d2  # pass decoder features to criterion
         else:
