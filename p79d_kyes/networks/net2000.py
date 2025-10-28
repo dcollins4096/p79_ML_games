@@ -410,7 +410,10 @@ class EBFlowHead(nn.Module):
             y = target.permute(0, 2, 3, 1).reshape(-1, 2)
             log_prob = self.flow.log_prob(y, context=context)
             #log_prob = self.flow.log_prob(y)
-            return -log_prob.mean()
+            sample = self.flow._transform.inverse(torch.zeros_like(y), context=context)[0]
+            loss = -log_prob.mean()# + 0.5 * F.mse_loss(sample, y)
+            return loss
+            #return -log_prob.mean()
         elif mode == "sample":
             n = B * H * W
             z = self.base.sample(n)
