@@ -30,8 +30,8 @@ fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 3000
-#ntrain = 10
+#ntrain = 3000
+ntrain = 10
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -360,6 +360,82 @@ def pearson_loss(pred, target, eps=1e-8):
 
     r = F.cosine_similarity(pred, target, dim=1)  # [B]
     return 1 - r.mean()
+
+# ======================================================
+# Conditional Normalizing Flow Head for E/B prediction
+# ======================================================
+from nflows import flows, distributions, transforms
+
+class EBFlowHead(nn.Module):
+    def __init__(self, in_channels, context_dim=32, hidden_features=128, num_layers=5):
+        super().__init__()
+
+        # compress local context (encoder output)
+        self.context_net = nn.Sequential(
+            nn.Conv2d(in_channels, context_dim, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(context_dim, context_dim, 3, padding=1),
+            nn.ReLU()
+        )
+
+        transform_list = []
+        for _ in range(num_layers):
+            transform_list.append(
+                transforms.MaskedAffineAutoregressiveTransform(
+                    features=2,
+                    hidden_features=hidden_features,
+                    context_features=context_dim
+                )
+            )
+            transform_list.append(transforms.RandomPermutation(features=2))
+        self.transform = transforms.CompositeTransform(transform_list)
+        self.base = distributions.StandardNormal(shape=[2])
+        self.flow = flows.Flow(self.transform, self.base)
+        self.context_dim = context_dim
+
+    def forward(self, features, target=None, mode="train"):
+        """
+        features: [B, C, H, W]
+        target:   [B, 2, H, W]  (E,B)
+        """
+        B, _, H, W = features.shape
+        context = self.context_net(features).permute(0, 2, 3, 1).reshape(-1, self.context_dim)
+
+        if mode == "train":
+            y = target.permute(0, 2, 3, 1).reshape(-1, 2)
+            log_prob = self.flow.log_prob(y, context=context)
+            return -log_prob.mean()
+        elif mode == "sample":
+            n = B * H * W
+            z = self.base.sample(n)
+            samples, _ = self.flow._transform.inverse(z, context=context)
+            samples = samples.reshape(B, H, W, 2).permute(0, 3, 1, 2)
+            return samples
+    def sample_n(self, features, n_samples=50):
+        """
+        Draw n_samples Monte Carlo samples from p(E,B | x) in a single batch.
+
+        features:  [B, C, H, W]  – encoder features
+        n_samples: int           – number of samples to draw per pixel
+
+        Returns:
+            samples: [n_samples, B, 2, H, W]
+        """
+        B, _, H, W = features.shape
+        context = self.context_net(features).permute(0, 2, 3, 1).reshape(-1, self.context_dim)
+
+        n_pix = B * H * W
+        z = self.base.sample(n_samples * n_pix)
+        z = z.view(n_samples * n_pix, -1)
+        context_rep = context.repeat(n_samples, 1)
+
+        # Invert the flow transform
+        samples, _ = self.flow._transform.inverse(z, context=context_rep)
+
+        # Reshape to [n_samples, B, 2, H, W]
+        samples = samples.view(n_samples, B, H, W, 2).permute(0, 1, 4, 2, 3)
+        return samples
+
         
 class ResidualBlockSE(nn.Module):
     def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0):
@@ -512,7 +588,8 @@ class main_net(nn.Module):
         self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
 
         # --- Probability distribution output head
-        self.out_prob = nn.Conv2d(base_channels, 2 * num_bins, kernel_size=1)
+        self.flow_head = EBFlowHead(base_channels, hidden_features=128, num_layers=5)
+
 
         # Optional cross-attention
         if use_cross_attention:
@@ -559,113 +636,47 @@ class main_net(nn.Module):
 
         if self.use_cross_attention:
             out_main = self.cross_attn(out_main)
-        out_prob = self.out_prob(d2)
-        out_prob = out_prob.view(x.shape[0], 2, self.num_bins, x.shape[2], x.shape[3])
 
-        return out_main, out_prob
-
-
+        if self.training:
+            # Expect target passed separately in criterion
+            return out_main, d2  # pass decoder features to criterion
+        else:
+            # Sample predicted E,B map from flow
+            samples = self.flow_head(d2, mode="sample")
+            return out_main, samples
     def criterion1(self, preds, target):
         """
-        preds: tuple of (out_main, out_d2, out_d3, out_d4)
-        target: [B, C, H, W] ground truth
+        preds: tuple (out_main, features)
+        target: [B, C, H, W]
         """
-        out_main, out_prob = preds
-        #out_main = preds
+        out_main, features = preds
         all_loss = {}
 
-        # Downsample target to match each prediction
-        if self.err_L1>0:
-            loss_main = F.l1_loss(out_main, target)
-            all_loss['L1_0']=self.err_L1*loss_main
+        # 1. Flow negative log-likelihood loss on E,B
+        EB = target[:, 1:, :, :]  # E,B channels
+        flow_loss = self.flow_head(features, target=EB, mode="train")
+        all_loss['Flow'] = flow_loss
 
-        # Weighted sum (more weight on full-res output)
+        # 2. Optionally keep your auxiliary image-space losses
+        if self.err_L1 > 0:
+            all_loss['L1'] = self.err_L1 * F.l1_loss(out_main, target)
         if self.err_SSIM > 0:
-            ssim_t  = ssim_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-            ssim_e  = ssim_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            ssim_b  = ssim_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            lambda_ssim = self.err_SSIM*(ssim_e+ssim_b+ssim_t)/3
-            all_loss['SSIM']=lambda_ssim
+            all_loss['SSIM'] = self.err_SSIM * ssim_loss(out_main[:,1:,:,:], target[:,1:,:,:])
         if self.err_Grad > 0:
-            grad_t  = gradient_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-            grad_e  = gradient_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            grad_b  = gradient_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            lambda_grad = self.err_Grad*(grad_e+grad_b+grad_t)/3
-            all_loss['Grad']=lambda_grad
+            all_loss['Grad'] = self.err_Grad * gradient_loss(out_main[:,1:,:,:], target[:,1:,:,:])
         if self.err_Pear > 0:
-            pear_t  = pearson_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-            pear_e  = pearson_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            pear_b  = pearson_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            lambda_pear = self.err_Pear*(pear_e+pear_b+pear_t)/3
-            all_loss['Pear']=lambda_pear
+            all_loss['Pear'] = self.err_Pear * pearson_loss(out_main[:,1:,:,:], target[:,1:,:,:])
         if self.err_Power > 0:
-            lambda_power = self.err_Power*power_spectra_crit(out_main, target)
-            all_loss['Power'] = lambda_power
+            all_loss['Power'] = self.err_Power * power_spectra_crit(out_main, target)
         if self.err_Cross > 0:
-            lambda_cross = self.err_Cross*cross_spectra_crit(out_main, target)
-            all_loss['Cross'] = lambda_cross
-        if self.err_Hot > 0:
-            EB = target[:, 1:, :, :]  # expect [B,2,H,W] for E,B
-            loss_hot = self.criterion_hot_2(out_prob, EB)
-            loss_mean = self.criterion_mean(out_prob,EB)
-            all_loss['Hot']=self.err_Hot*(loss_hot+loss_mean)
+            all_loss['Cross'] = self.err_Cross * cross_spectra_crit(out_main, target)
 
         return all_loss
-    def criterion_mean(self, out_prob, target):
-        """L1 between target and predicted mean."""
-        mean, _ = self.meanie(out_prob)
-        return F.l1_loss(mean, target)
-    def criterion_hot(self,out_prob,target):
-        import hotness
-        target_E = hotness.encode(target[:,0,...], self.range, self.num_bins)
-        target_B = hotness.encode(target[:,1,...], self.range, self.num_bins)
-        logits = torch.cat([out_prob[:, 0, ...], out_prob[:, 1, ...]], dim=0)  # [2B, num_bins, H, W]
-        target_bins = torch.cat([target_E, target_B], dim=0)                   # [2B, H, W]
 
-        # Cross-entropy on raw logits (softmax handled inside)
-        loss = F.cross_entropy(logits, target_bins)
 
-    def criterion_hot_2(self, out_prob, target):
-        """
-        Smooth (Gaussian) one-hot cross-entropy loss.
-        out_prob: [B, 2, num_bins, H, W]
-        target:   [B, 2, H, W]
-        """
-        B, two, num_bins, H, W = out_prob.shape
-        bins = torch.linspace(self.range[0], self.range[1],
-                              self.num_bins, device=target.device)
-        # Map target to fractional bin index
-        target = target.clamp(float(self.range[0]), float(self.range[1]))
-        frac_idx = (target - self.range[0]) / (self.range[1] - self.range[0]) * (num_bins - 1)
 
-        # Make Gaussian soft labels
-        #self.sigma=1
-        self.sigma = 0.5 * (self.range[1] - self.range[0]) / self.num_bins
-
-        grid = torch.arange(num_bins, device=target.device).view(1, 1, 1, 1, num_bins)
-        idx = frac_idx.unsqueeze(-1)
-        soft_target = torch.exp(-0.5 * ((grid - idx) ** 2) / self.sigma ** 2)
-        soft_target = soft_target / (soft_target.sum(-1, keepdim=True) + 1e-8)
-
-        logits = out_prob.permute(0, 1, 3, 4, 2)  # [B,2,H,W,num_bins]
-        logits /= 2
-        log_probs = F.log_softmax(logits, dim=-1)
-        loss = -(soft_target * log_probs).sum(-1).mean()
-        return loss
-
+        return all_loss
     def criterion(self, preds, target):
         losses = self.criterion1(preds,target)
 
         return sum(losses.values())
-    def meanie(self, out_prob):
-        """
-        Compute mean and std of predicted distribution.
-        out_prob: [B, 2, num_bins, H, W]
-        """
-        bins = torch.linspace(self.range[0], self.range[1], self.num_bins,
-                              device=out_prob.device, dtype=out_prob.dtype)
-        probs = F.softmax(out_prob, dim=2)
-        mean = (probs * bins.view(1, 1, -1, 1, 1)).sum(2)
-        var = (probs * (bins.view(1, 1, -1, 1, 1) - mean.unsqueeze(2)) ** 2).sum(2)
-        return mean, var
-
