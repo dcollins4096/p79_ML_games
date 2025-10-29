@@ -191,7 +191,7 @@ def trainer(
                     print("  crit")
 
                 #loss  = model.criterion(preds, yb[:,0:1,:,:])
-                loss  = model.criterion(preds, yb)
+                loss  = model.criterion(preds, yb, epoch=epoch)
 
             if verbose:
                 print("  scale backward")
@@ -218,7 +218,7 @@ def trainer(
                 yb = yb.to(device)
                 preds = model(xb, return_features=True)
                 #vloss = model.criterion(preds, yb[:,0:1,:,:])
-                vloss = model.criterion(preds, yb)
+                vloss = model.criterion(preds, yb, epoch=epoch)
                 vtotal += vloss.item() * xb.size(0)
             val_loss = vtotal / len(ds_val)
             val_curve.append(val_loss)
@@ -426,7 +426,7 @@ class EBFlowHead(nn.Module):
             tv = (sample_res[:, :, :, 1:] - sample_res[:, :, :, :-1]).pow(2).mean().sqrt() + \
                  (sample_res[:, :, 1:, :] - sample_res[:, :, :-1, :]).pow(2).mean().sqrt()
 
-            loss = -log_prob.mean() #+ 0.5 * F.mse_loss(sample0, y) + 1e-6 * tv
+            loss = -log_prob.mean() +1e-6*tv + 0.1 * F.mse_loss(sample0, y)# + 1e-6 * tv
             return loss
 
         elif mode == "sample":
@@ -618,8 +618,8 @@ class main_net(nn.Module):
         self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
 
         # --- Probability distribution output head
-        #self.flow_head = EBFlowHead(base_channels, hidden_features=256, num_layers=8)
-        self.flow_head = EBFlowHead(in_channels=224, hidden_features=256, num_layers=8)
+        self.flow_head = EBFlowHead(base_channels, hidden_features=256, num_layers=8)
+        #self.flow_head = EBFlowHead(in_channels=224, hidden_features=256, num_layers=8)
 
 
         # Optional cross-attention
@@ -665,11 +665,13 @@ class main_net(nn.Module):
         out_main = self.dec1(d2)
 
 
-        context_in = torch.cat([
-                d2,
-                F.interpolate(d3, size=d2.shape[-2:], mode="bilinear", align_corners=False),
-                F.interpolate(d4, size=d2.shape[-2:], mode="bilinear", align_corners=False)
-        ], dim=1)
+        context_in = d2
+        if 0:
+            context_in = torch.cat([
+                    d2,
+                    F.interpolate(d3, size=d2.shape[-2:], mode="bilinear", align_corners=False),
+                    F.interpolate(d4, size=d2.shape[-2:], mode="bilinear", align_corners=False)
+            ], dim=1)
         if self.use_cross_attention:
             out_main = self.cross_attn(out_main)
 
@@ -680,7 +682,7 @@ class main_net(nn.Module):
             # Sample predicted E,B map from flow
             samples = self.flow_head(context_in, mode="sample")
             return out_main, samples
-    def criterion1(self, preds, target):
+    def criterion1(self, preds, target, epoch=10):
         """
         preds: tuple (out_main, features)
         target: [B, C, H, W]
@@ -691,7 +693,8 @@ class main_net(nn.Module):
         # 1. Flow negative log-likelihood loss on E,B
         EB = target[:, 1:, :, :]  # E,B channels
         flow_loss = self.flow_head(features, target=EB, mode="train")
-        all_loss['Flow'] = flow_loss
+        err_Flow = 1 #max([epoch/10,1])
+        all_loss['Flow'] = err_Flow*flow_loss
 
         # 2. Optionally keep your auxiliary image-space losses
         if self.err_L1 > 0:
@@ -712,7 +715,7 @@ class main_net(nn.Module):
 
 
         return all_loss
-    def criterion(self, preds, target):
-        losses = self.criterion1(preds,target)
+    def criterion(self, preds, target, epoch=10):
+        losses = self.criterion1(preds,target,epoch=epoch)
 
         return sum(losses.values())
