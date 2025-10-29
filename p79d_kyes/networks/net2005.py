@@ -23,7 +23,7 @@ import torch_power
 
 
 idd = 2005
-what = "180 with the normalizing flow head, more loss in flow head"
+what = "180 with the normalizing flow head, more loss in flow head, predict all three for both heads. Starting"
 
 fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -38,8 +38,8 @@ nvalid=30
 downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-epochs  = 20
-#epochs = 200
+#epochs  = 20
+epochs = 200
 lr = 1e-3
 #lr = 1e-4
 batch_size=64
@@ -425,10 +425,10 @@ class EBFlowHead(nn.Module):
             sample_res = sample0.view(B, H, W, 3).permute(0, 3, 1, 2).contiguous()
 
 # SSIM on mode sample
-            ssim_term = ssim_loss(sample_res, y.reshape(B, 2, H, W))
+            ssim_term = ssim_loss(sample_res, y.reshape(B, 3, H, W))
 
 # Power-spectrum mismatch
-            pwr_term = power_spectra_crit(sample_res, y.reshape(B, 2, H, W))
+            pwr_term = power_spectra_crit(sample_res, y.reshape(B, 3, H, W))
 
 # Mild smoothness
             tv = (sample_res[:, :, :, 1:] - sample_res[:, :, :, :-1]).abs().mean() + \
@@ -479,7 +479,7 @@ class EBFlowHead(nn.Module):
         samples, _ = self.flow._transform.inverse(z, context=context_rep)
 
         # Reshape to [n_samples, B, 2, H, W]
-        samples = samples.view(n_samples, B, H, W, 2).permute(0, 1, 4, 2, 3)
+        samples = samples.view(n_samples, B, H, W, 3).permute(0, 1, 4, 2, 3)
         return samples
 
         
