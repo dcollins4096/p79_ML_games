@@ -22,15 +22,15 @@ import torchvision.transforms.functional as TF
 from torchvision.transforms import InterpolationMode
 
 
-idd = 188
-what = "186 with a mask on rotation"
+idd = 189
+what = "188 masked rotation mask only"
 
 fname_train = "p79d_subsets_S256_N5_xyz_down_128suite4_first.h5"
 fname_valid = "p79d_subsets_S256_N5_xyz_down_128suite4_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
-ntrain = 20
-ntrain = 500
+#ntrain = 20
+ntrain = 1000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -59,7 +59,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=64,fc_hidden=1024 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
+    model = main_net(base_channels=64,fc_hidden=1024 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1, rotation_prob=1)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -99,14 +99,16 @@ class SphericalDataset(Dataset):
         else:
             self.all_data=all_data
         self.fill=fill
+        self.angles  = np.random.uniform(-90,90,len(all_data))
     def __len__(self):
         return self.all_data.size(0)
 
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
         theset = self.all_data[idx]
-        if random.uniform(0,1) < self.rotation_prob or True:
-            angle = random.uniform(-90,90)
+        if random.uniform(0,1) < self.rotation_prob:
+            #angle = random.uniform(-90,90)
+            angle = self.angles[idx]
             theset = TF.rotate(theset,angle)
             ones = torch.ones((1, theset.shape[1], theset.shape[2]), device=theset.device, dtype=theset.dtype)
             valid = TF.rotate(ones, angle, interpolation=InterpolationMode.NEAREST, fill=0)[0]
@@ -527,7 +529,7 @@ class main_net(nn.Module):
     def __init__(self, in_channels=2, out_channels=3, base_channels=32,
                  use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=1.0,
                  use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='max', 
-                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=0,err_Mask=1,
+                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=0,err_Power=1,err_Bisp=0,err_Cross=0,err_Mask=1,
                  suffix='', dropout_1=0, dropout_2=0, dropout_3=0):
         super().__init__()
         arg_dict = locals()

@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+import torchvision.transforms.functional as TF
+import random
 import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
@@ -18,19 +20,18 @@ import pdb
 import loader
 from scipy.ndimage import gaussian_filter
 import torch_power
-import torchvision.transforms.functional as TF
-from torchvision.transforms import InterpolationMode
 
 
-idd = 188
-what = "186 with a mask on rotation"
+idd = 1002
+what = "180 with the one-hot block"
 
-fname_train = "p79d_subsets_S256_N5_xyz_down_128suite4_first.h5"
-fname_valid = "p79d_subsets_S256_N5_xyz_down_128suite4_second.h5"
+fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
+fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
-ntrain = 20
-ntrain = 500
+#ntrain = 20
+ntrain = 3000
+#ntrain = 10
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -43,13 +44,13 @@ lr = 1e-3
 #lr = 1e-4
 batch_size=64
 lr_schedule=[100]
-weight_decay = 1e-2
+weight_decay = 1e-3
 fc_bottleneck=True
 def load_data():
 
     print('read the data')
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
-    valid= loader.loader(fname_valid,ntrain=17000, nvalid=nvalid)
+    valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
     all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'], 'quantities':{}}
     all_data['quantities']['train']=train['quantities']['train']
     all_data['quantities']['valid']=valid['quantities']['valid']
@@ -59,7 +60,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=64,fc_hidden=1024 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
+    model = main_net(base_channels=32,fc_hidden=512 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -71,9 +72,6 @@ def thisnet():
 
 def train(model,all_data):
     trainer(model,all_data,epochs=epochs,lr=lr,batch_size=batch_size, weight_decay=weight_decay, lr_schedule=lr_schedule)
-
-import torch
-import torch.nn.functional as F
 
 def downsample_avg(x, M):
     if x.ndim == 2:   # [N, N]
@@ -89,28 +87,22 @@ def downsample_avg(x, M):
 # ---------------------------
 # Dataset with input normalization
 # ---------------------------
-import torchvision.transforms.functional as TF
-import random
 class SphericalDataset(Dataset):
-    def __init__(self, all_data, rotation_prob = 0.0, fill = torch.nan):
+    def __init__(self, all_data, rotation_prob = 0.0, downsample=downsample):
         self.rotation_prob = rotation_prob
         if downsample:
             self.all_data=downsample_avg(all_data,downsample)
         else:
             self.all_data=all_data
-        self.fill=fill
     def __len__(self):
         return self.all_data.size(0)
 
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
         theset = self.all_data[idx]
-        if random.uniform(0,1) < self.rotation_prob or True:
+        if random.uniform(0,1) < self.rotation_prob:
             angle = random.uniform(-90,90)
             theset = TF.rotate(theset,angle)
-            ones = torch.ones((1, theset.shape[1], theset.shape[2]), device=theset.device, dtype=theset.dtype)
-            valid = TF.rotate(ones, angle, interpolation=InterpolationMode.NEAREST, fill=0)[0]
-            theset[0][valid==0] = self.fill
         return theset[0], theset
 
 # ---------------------------
@@ -140,23 +132,25 @@ def trainer(
 ):
     set_seed()
 
-    ds_train = SphericalDataset(all_data['train'], rotation_prob=model.rotation_prob)
-    ds_val   = SphericalDataset(all_data['valid'], rotation_prob=model.rotation_prob)
+    ds_train = SphericalDataset(all_data['train'], rotation_prob=model.rotation_prob, downsample=downsample)
+    ds_val   = SphericalDataset(all_data['valid'], rotation_prob=model.rotation_prob, downsample=downsample)
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader   = DataLoader(ds_val,   batch_size=max(64, batch_size), shuffle=False, drop_last=False)
 
     model = model.to(device)
+    rng_min = all_data['train'][:,1:,:,:].min()
+    rng_max = all_data['train'][:,1:,:,:].max()
+    model.range=[rng_min,rng_max]
+
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * max(1, len(train_loader))
     print("Total Steps", total_steps)
-    if 0:
-        scheduler = optim.lr_scheduler.MultiStepLR(
-            optimizer,
-            milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
-            gamma=0.1             # multiply by gamma each time
-        )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+    scheduler = optim.lr_scheduler.MultiStepLR(
+        optimizer,
+        milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
+        gamma=0.1             # multiply by gamma each time
+    )
 
     best_val = float("inf")
     best_state = None
@@ -200,7 +194,6 @@ def trainer(
 
             if verbose:
                 print("  steps")
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
 
             running += loss.item() * xb.size(0)
@@ -270,20 +263,6 @@ def trainer(
             #break
 
     return model
-    # restore best
-    #if best_state is not None:
-    #    model.load_state_dict(best_state)
-
-    # quick plot (optional)
-
-def plot_loss_curve(model):
-    plt.clf()
-    plt.plot(model.train_curve.cpu(), label="train")
-    plt.plot(model.val_curve.cpu(),   label="val")
-    plt.yscale("log")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig("%s/plots/errtime_net%04d"%(os.environ['HOME'], model.idd))
 
 def power_spectrum_delta(guess,target):
     T_guess = torch_power.powerspectrum(guess)
@@ -296,18 +275,6 @@ def power_spectra_crit(guess,target):
     err_E = power_spectrum_delta(guess[:,1:2,:,:], target[:,1:2,:,:])
     err_B = power_spectrum_delta(guess[:,2:3,:,:], target[:,2:3,:,:])
     return err_T+err_E+err_B
-
-def cross_spectrum_delta(guess,target):
-    T_guess = torch_power.crossspectrum(guess, target)
-    T_target = torch_power.powerspectrum(target)
-    num = torch.clamp(torch.abs(T_guess.avgpower), min=1e-12)
-    den = torch.clamp(T_target.avgpower, min=1e-12)
-    output = torch.mean(torch.abs(torch.log(num / den)))
-    if (T_guess.avgpower < 0).any():
-            negative = torch.mean(torch.abs(T_guess.avgpower[T_guess.avgpower < 0]))
-    else:
-            negative = 0.0
-    return output+negative
 
 def cross_spectrum_cosine(guess, target):
     G = torch.fft.fftn(guess, dim=(-2, -1))
@@ -322,31 +289,78 @@ def cross_spectra_crit(guess,target):
     err_B = cross_spectrum_cosine(guess[:,2:3,:,:], target[:,2:3,:,:])
     return err_T+err_E+err_B
 
-import bispectrum
-def bispectrum_crit(guess,target):
-    nsamples=100
-    T_guess = bispectrum.compute_bispectrum_torch(guess[:,0:1,:,:]  ,nsamples=nsamples)[0]
-    E_guess = bispectrum.compute_bispectrum_torch(guess[:,1:2,:,:]  ,nsamples=nsamples)[0]
-    B_guess = bispectrum.compute_bispectrum_torch(guess[:,2:3,:,:]  ,nsamples=nsamples)[0]
-    T_target = bispectrum.compute_bispectrum_torch(target[:,0:1,:,:],nsamples=nsamples)[0]
-    E_target = bispectrum.compute_bispectrum_torch(target[:,1:2,:,:],nsamples=nsamples)[0]
-    B_target = bispectrum.compute_bispectrum_torch(target[:,2:3,:,:],nsamples=nsamples)[0]
-    dT = torch.mean(torch.abs(torch.log(torch.abs( T_guess / T_target))))
-    dE = torch.mean(torch.abs(torch.log(torch.abs( E_guess / E_target))))
-    dB = torch.mean(torch.abs(torch.log(torch.abs( B_guess / B_target))))
-    #pdb.set_trace()
-    return dT+dE+dB
+def ssim_loss(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
+    """
+    Compute SSIM loss: 1 - SSIM (so that lower is better).
+    pred, target: [B, C, H, W]
+    """
+    # Gaussian kernel for local statistics
+    def gaussian_window(window_size, sigma=1.5):
+        coords = torch.arange(window_size, dtype=torch.float)
+        coords -= window_size // 2
+        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+        g /= g.sum()
+        return g
 
-def error_real_imag(guess,target):
+    device = pred.device
+    channel = pred.size(1)
+    window = gaussian_window(window_size).to(device)
+    window_2d = (window[:, None] * window[None, :]).unsqueeze(0).unsqueeze(0)
+    window_2d = window_2d.repeat(channel, 1, 1, 1)
 
-    L1  = F.l1_loss(guess.real, target.real)
-    L1 += F.l1_loss(guess.imag, target.imag)
-    return L1
+    mu_pred = F.conv2d(pred, window_2d, padding=window_size//2, groups=channel)
+    mu_target = F.conv2d(target, window_2d, padding=window_size//2, groups=channel)
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+    mu_pred_sq = mu_pred.pow(2)
+    mu_target_sq = mu_target.pow(2)
+    mu_pred_target = mu_pred * mu_target
 
+    sigma_pred_sq = F.conv2d(pred * pred, window_2d, padding=window_size//2, groups=channel) - mu_pred_sq
+    sigma_target_sq = F.conv2d(target * target, window_2d, padding=window_size//2, groups=channel) - mu_target_sq
+    sigma_pred_target = F.conv2d(pred * target, window_2d, padding=window_size//2, groups=channel) - mu_pred_target
+
+    ssim_map = ((2 * mu_pred_target + C1) * (2 * sigma_pred_target + C2)) / \
+               ((mu_pred_sq + mu_target_sq + C1) * (sigma_pred_sq + sigma_target_sq + C2))
+
+    return 1 - ssim_map.mean()  # SSIM loss
+
+
+def gradient_loss(pred, target):
+    """
+    Computes a gradient (edge-aware) loss between pred and target.
+    Both tensors should be [B, C, H, W].
+    Returns a scalar loss.
+    """
+    # Compute gradients in x and y direction
+    pred_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
+    pred_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
+    target_dx = target[:, :, :, 1:] - target[:, :, :, :-1]
+    target_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
+
+    loss_x = F.l1_loss(pred_dx, target_dx)
+    loss_y = F.l1_loss(pred_dy, target_dy)
+
+    return loss_x + loss_y
+
+def pearson_loss(pred, target, eps=1e-8):
+    """
+    pred, target: [B, 1, H, W]
+    Computes 1 - Pearson correlation (mean over batch)
+    """
+    B = pred.shape[0]
+    pred = pred.reshape(B, -1)
+    target = target.reshape(B, -1)
+
+    # zero-mean + variance normalize
+    pred = pred - pred.mean(dim=1, keepdim=True)
+    target = target - target.mean(dim=1, keepdim=True)
+
+    pred = pred / (pred.norm(dim=1, keepdim=True) + eps)
+    target = target / (target.norm(dim=1, keepdim=True) + eps)
+
+    r = F.cosine_similarity(pred, target, dim=1)  # [B]
+    return 1 - r.mean()
+        
 class ResidualBlockSE(nn.Module):
     def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0):
         super().__init__()
@@ -416,42 +430,6 @@ class ResidualBlockSE(nn.Module):
         out += identity
         return F.relu(out)
 
-
-def ssim_loss(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
-    """
-    Compute SSIM loss: 1 - SSIM (so that lower is better).
-    pred, target: [B, C, H, W]
-    """
-    # Gaussian kernel for local statistics
-    def gaussian_window(window_size, sigma=1.5):
-        coords = torch.arange(window_size, dtype=torch.float)
-        coords -= window_size // 2
-        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
-        g /= g.sum()
-        return g
-
-    device = pred.device
-    channel = pred.size(1)
-    window = gaussian_window(window_size).to(device)
-    window_2d = (window[:, None] * window[None, :]).unsqueeze(0).unsqueeze(0)
-    window_2d = window_2d.repeat(channel, 1, 1, 1)
-
-    mu_pred = F.conv2d(pred, window_2d, padding=window_size//2, groups=channel)
-    mu_target = F.conv2d(target, window_2d, padding=window_size//2, groups=channel)
-
-    mu_pred_sq = mu_pred.pow(2)
-    mu_target_sq = mu_target.pow(2)
-    mu_pred_target = mu_pred * mu_target
-
-    sigma_pred_sq = F.conv2d(pred * pred, window_2d, padding=window_size//2, groups=channel) - mu_pred_sq
-    sigma_target_sq = F.conv2d(target * target, window_2d, padding=window_size//2, groups=channel) - mu_target_sq
-    sigma_pred_target = F.conv2d(pred * target, window_2d, padding=window_size//2, groups=channel) - mu_pred_target
-
-    ssim_map = ((2 * mu_pred_target + C1) * (2 * sigma_pred_target + C2)) / \
-               ((mu_pred_sq + mu_target_sq + C1) * (sigma_pred_sq + sigma_target_sq + C2))
-
-    return 1 - ssim_map.mean()  # SSIM loss
-
 class CrossAttention(nn.Module):
     def __init__(self, channels, num_heads=4):
         super().__init__()
@@ -467,70 +445,17 @@ class CrossAttention(nn.Module):
         return x_attn.transpose(1, 2).view(B, C, H, W)
 
 
-def gradient_loss(pred, target):
-    """
-    Computes a gradient (edge-aware) loss between pred and target.
-    Both tensors should be [B, C, H, W].
-    Returns a scalar loss.
-    """
-    # Compute gradients in x and y direction
-    pred_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
-    pred_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
-    target_dx = target[:, :, :, 1:] - target[:, :, :, :-1]
-    target_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
-
-    loss_x = F.l1_loss(pred_dx, target_dx)
-    loss_y = F.l1_loss(pred_dy, target_dy)
-
-    return loss_x + loss_y
-
-def my_pearsonr(x, y, eps=1e-8):
-    """
-    Compute Pearson correlation coefficient between two tensors x and y.
-    x and y must have the same shape.
-    """
-    x_mean = x.mean()
-    y_mean = y.mean()
-
-    xm = x - x_mean
-    ym = y - y_mean
-
-    r_num = torch.sum(xm * ym)
-    r_den = torch.sqrt(torch.sum(xm ** 2) * torch.sum(ym ** 2) + eps)
-
-    return r_num / r_den
-
-   
-import torch
-import torch.nn.functional as F
-
-def pearson_loss(pred, target, eps=1e-8):
-    """
-    pred, target: [B, 1, H, W]
-    Computes 1 - Pearson correlation (mean over batch)
-    """
-    B = pred.shape[0]
-    pred = pred.reshape(B, -1)
-    target = target.reshape(B, -1)
-
-    # zero-mean + variance normalize
-    pred = pred - pred.mean(dim=1, keepdim=True)
-    target = target - target.mean(dim=1, keepdim=True)
-
-    pred = pred / (pred.norm(dim=1, keepdim=True) + eps)
-    target = target / (target.norm(dim=1, keepdim=True) + eps)
-
-    r = F.cosine_similarity(pred, target, dim=1)  # [B]
-    return 1 - r.mean()
-
 class main_net(nn.Module):
-    def __init__(self, in_channels=2, out_channels=3, base_channels=32,
-                 use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=1.0,
+    def __init__(self, in_channels=1, out_channels=3, base_channels=32,
+                 use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
                  use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='max', 
-                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=0,err_Mask=1,
-                 suffix='', dropout_1=0, dropout_2=0, dropout_3=0):
+                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Cross=1, err_Hot=2,
+                 suffix='', dropout_1=0, dropout_2=0, dropout_3=0, use_one_hot=True,
+                rng=[0,1], num_bins=32):
         super().__init__()
         arg_dict = locals()
+        self.range=rng
+        self.num_bins=num_bins
         self.use_fc_bottleneck = use_fc_bottleneck
         self.fc_spatial = fc_spatial
         self.dropout_2=dropout_2
@@ -541,9 +466,8 @@ class main_net(nn.Module):
         self.err_SSIM=err_SSIM
         self.err_Grad=err_Grad
         self.err_Power=err_Power
-        self.err_Bisp=err_Bisp
         self.err_Cross=err_Cross
-        self.err_Mask=err_Mask
+        self.err_Hot = err_Hot
         self.rotation_prob=rotation_prob
         if 0:
             for arg in arg_dict:
@@ -583,10 +507,8 @@ class main_net(nn.Module):
         self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type, dropout_p=dropout_3)
         self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
 
-        # --- Multi-scale output heads ---
-        self.out_d4 = nn.Conv2d(base_channels*4, out_channels, 3, padding=1)
-        self.out_d3 = nn.Conv2d(base_channels*2, out_channels, 3, padding=1)
-        self.out_d2 = nn.Conv2d(base_channels,   out_channels, 3, padding=1)
+        # --- Probability distribution output head
+        self.out_prob = nn.Conv2d(base_channels, 2 * num_bins, kernel_size=1)
 
         # Optional cross-attention
         if use_cross_attention:
@@ -594,18 +516,11 @@ class main_net(nn.Module):
 
         self.register_buffer("train_curve", torch.zeros(epochs))
         self.register_buffer("val_curve", torch.zeros(epochs))
-        self.loss_weights = nn.Parameter(torch.tensor([1.0, 0.5, 0.25, 0.125, 1,1,1,1], dtype=torch.float32))
 
 
     def forward(self, x):
         if x.ndim == 3:
             x = x.unsqueeze(1)
-        mask = torch.isfinite(x)
-        unmask = torch.isnan(x)
-        x = torch.nan_to_num(x, nan=0.0)
-        mask_single = mask.any(dim=1, keepdim=True).float()
-        x = torch.cat([x, mask_single], dim=1)
-
 
         # Encoder
         e1 = self.enc1(x)
@@ -639,15 +554,13 @@ class main_net(nn.Module):
 
         out_main = self.dec1(d2)
 
-        # Multi-scale predictions
-        out_d4 = self.out_d4(d4)
-        out_d3 = self.out_d3(d3)
-        out_d2 = self.out_d2(d2)
 
         if self.use_cross_attention:
             out_main = self.cross_attn(out_main)
+        out_prob = self.out_prob(d2)
+        out_prob = out_prob.view(x.shape[0], 2, self.num_bins, x.shape[2], x.shape[3])
 
-        return out_main, out_d2, out_d3, out_d4
+        return out_main, out_prob
 
 
     def criterion1(self, preds, target):
@@ -655,29 +568,14 @@ class main_net(nn.Module):
         preds: tuple of (out_main, out_d2, out_d3, out_d4)
         target: [B, C, H, W] ground truth
         """
-        mask = torch.isfinite(target)
-        unmask = torch.isnan(target)
-        target = torch.nan_to_num(target, nan=0.0)
-        if 0:
-            mask_single = mask.any(dim=1, keepdim=True).float()
-            x = torch.cat([x, mask_single], dim=1)
-        out_main, out_d2, out_d3, out_d4 = preds
+        out_main, out_prob = preds
+        #out_main = preds
         all_loss = {}
 
         # Downsample target to match each prediction
         if self.err_L1>0:
             loss_main = F.l1_loss(out_main, target)
             all_loss['L1_0']=self.err_L1*loss_main
-        if self.err_Multi>0:
-            t_d2 = F.interpolate(target, size=out_d2.shape[-2:], mode="bilinear", align_corners=False)
-            t_d3 = F.interpolate(target, size=out_d3.shape[-2:], mode="bilinear", align_corners=False)
-            t_d4 = F.interpolate(target, size=out_d4.shape[-2:], mode="bilinear", align_corners=False)
-
-            loss_d2   = F.l1_loss(out_d2, t_d2)
-            loss_d3   = F.l1_loss(out_d3, t_d3)
-            loss_d4   = F.l1_loss(out_d4, t_d4)
-            loss_multi = self.err_Multi*(loss_d2+loss_d3+loss_d4)
-            all_loss['L1_Multi'] = loss_multi
 
         # Weighted sum (more weight on full-res output)
         if self.err_SSIM > 0:
@@ -704,21 +602,55 @@ class main_net(nn.Module):
         if self.err_Cross > 0:
             lambda_cross = self.err_Cross*cross_spectra_crit(out_main, target)
             all_loss['Cross'] = lambda_cross
-        if self.err_Bisp > 0:
-            lambda_bisp = self.err_Bisp*bispectrum_crit(out_main,target)
-            all_loss['Bisp'] = lambda_bisp
-        if self.err_Mask>0:
-            loss_mask =  torch.abs((out_main[:,0,:,:]*unmask[:,0,:,:])).sum()
-            loss_mask+=  torch.abs((out_main[:,1,:,:]*unmask[:,0,:,:])).sum()
-            loss_mask+=  torch.abs((out_main[:,2,:,:]*unmask[:,0,:,:])).sum()
-            loss_mask /= out_main[:,0,:,:].numel()
-
-            all_loss['Mask'] = self.err_Mask*loss_mask
+        if self.err_Hot > 0:
+            EB = target[:, 1:, :, :]  # expect [B,2,H,W] for E,B
+            loss_hot = self.criterion_hot(out_prob, EB)
+            loss_mean = self.criterion_mean(out_prob,EB)
+            all_loss['Hot']=self.err_Hot*(loss_hot+loss_mean)
 
         return all_loss
+    def criterion_mean(self, out_prob, target):
+        """L1 between target and predicted mean."""
+        mean, _ = self.meanie(out_prob)
+        return F.l1_loss(mean, target)
+    def criterion_hot(self, out_prob, target):
+        """
+        Smooth (Gaussian) one-hot cross-entropy loss.
+        out_prob: [B, 2, num_bins, H, W]
+        target:   [B, 2, H, W]
+        """
+        B, two, num_bins, H, W = out_prob.shape
+        bins = torch.linspace(self.range[0], self.range[1],
+                              self.num_bins, device=target.device)
+        # Map target to fractional bin index
+        target = target.clamp(float(self.range[0]), float(self.range[1]))
+        frac_idx = (target - self.range[0]) / (self.range[1] - self.range[0]) * (num_bins - 1)
+
+        # Make Gaussian soft labels
+        self.sigma=1
+        grid = torch.arange(num_bins, device=target.device).view(1, 1, 1, 1, num_bins)
+        idx = frac_idx.unsqueeze(-1)
+        soft_target = torch.exp(-0.5 * ((grid - idx) ** 2) / self.sigma ** 2)
+        soft_target = soft_target / (soft_target.sum(-1, keepdim=True) + 1e-8)
+
+        logits = out_prob.permute(0, 1, 3, 4, 2)  # [B,2,H,W,num_bins]
+        log_probs = F.log_softmax(logits, dim=-1)
+        loss = -(soft_target * log_probs).sum(-1).mean()
+        return loss
 
     def criterion(self, preds, target):
         losses = self.criterion1(preds,target)
 
         return sum(losses.values())
+    def meanie(self, out_prob):
+        """
+        Compute mean and std of predicted distribution.
+        out_prob: [B, 2, num_bins, H, W]
+        """
+        bins = torch.linspace(self.range[0], self.range[1], self.num_bins,
+                              device=out_prob.device, dtype=out_prob.dtype)
+        probs = F.softmax(out_prob, dim=2)
+        mean = (probs * bins.view(1, 1, -1, 1, 1)).sum(2)
+        var = (probs * (bins.view(1, 1, -1, 1, 1) - mean.unsqueeze(2)) ** 2).sum(2)
+        return mean, var
 

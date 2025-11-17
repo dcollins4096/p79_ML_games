@@ -18,19 +18,17 @@ import pdb
 import loader
 from scipy.ndimage import gaussian_filter
 import torch_power
-import torchvision.transforms.functional as TF
-from torchvision.transforms import InterpolationMode
 
 
-idd = 188
-what = "186 with a mask on rotation"
+idd = 302
+what = "180 with more simplifications.  One conv per block, 3 levels, no squeeze."
 
-fname_train = "p79d_subsets_S256_N5_xyz_down_128suite4_first.h5"
-fname_valid = "p79d_subsets_S256_N5_xyz_down_128suite4_second.h5"
+fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
+fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
-ntrain = 20
-ntrain = 500
+#ntrain = 20
+ntrain = 3000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -43,13 +41,13 @@ lr = 1e-3
 #lr = 1e-4
 batch_size=64
 lr_schedule=[100]
-weight_decay = 1e-2
+weight_decay = 1e-3
 fc_bottleneck=True
 def load_data():
 
     print('read the data')
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
-    valid= loader.loader(fname_valid,ntrain=17000, nvalid=nvalid)
+    valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
     all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'], 'quantities':{}}
     all_data['quantities']['train']=train['quantities']['train']
     all_data['quantities']['valid']=valid['quantities']['valid']
@@ -59,7 +57,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=64,fc_hidden=1024 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
+    model = main_net(base_channels=32,fc_hidden=512 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -92,25 +90,21 @@ def downsample_avg(x, M):
 import torchvision.transforms.functional as TF
 import random
 class SphericalDataset(Dataset):
-    def __init__(self, all_data, rotation_prob = 0.0, fill = torch.nan):
+    def __init__(self, all_data, rotation_prob = 0.0):
         self.rotation_prob = rotation_prob
         if downsample:
             self.all_data=downsample_avg(all_data,downsample)
         else:
             self.all_data=all_data
-        self.fill=fill
     def __len__(self):
         return self.all_data.size(0)
 
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
         theset = self.all_data[idx]
-        if random.uniform(0,1) < self.rotation_prob or True:
+        if random.uniform(0,1) < self.rotation_prob:
             angle = random.uniform(-90,90)
             theset = TF.rotate(theset,angle)
-            ones = torch.ones((1, theset.shape[1], theset.shape[2]), device=theset.device, dtype=theset.dtype)
-            valid = TF.rotate(ones, angle, interpolation=InterpolationMode.NEAREST, fill=0)[0]
-            theset[0][valid==0] = self.fill
         return theset[0], theset
 
 # ---------------------------
@@ -173,8 +167,8 @@ def trainer(
 
 
     for epoch in range(1, epochs+1):
-        if epoch > 50 and save_err_Cross>0:
-            model.err_Cross = save_err_Cross
+        #if epoch > 50 and save_err_Cross>0:
+        #    model.err_Cross = save_err_Cross
         model.train()
         if verbose:
             print("Epoch %d"%epoch)
@@ -200,7 +194,6 @@ def trainer(
 
             if verbose:
                 print("  steps")
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
 
             running += loss.item() * xb.size(0)
@@ -352,8 +345,9 @@ class ResidualBlockSE(nn.Module):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        #kill 1
+        #self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        #self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.dropout = nn.Dropout2d(p=dropout_p) 
 
@@ -362,58 +356,62 @@ class ResidualBlockSE(nn.Module):
         if in_channels != out_channels:
             self.proj = nn.Conv2d(in_channels, out_channels, 1)
 
+        if 0:
         # --- Pooling variants ---
-        self.pool_type = pool_type
-        if pool_type == "avg":
-            self.pool = nn.AdaptiveAvgPool2d(1)
-        elif pool_type == "max":
-            self.pool = nn.AdaptiveMaxPool2d(1)
-        elif pool_type == "avgmax":
-            # Concatenate avg + max → doubles channels for fc1
-            self.pool_avg = nn.AdaptiveAvgPool2d(1)
-            self.pool_max = nn.AdaptiveMaxPool2d(1)
-        elif pool_type == "learned":
-            # 1x1 conv to learn pooling weights (H×W → 1)
-            self.pool = nn.Conv2d(out_channels, 1, kernel_size=1)
+            self.pool_type = pool_type
+            if pool_type == "avg":
+                self.pool = nn.AdaptiveAvgPool2d(1)
+            elif pool_type == "max":
+                self.pool = nn.AdaptiveMaxPool2d(1)
+            elif pool_type == "avgmax":
+                # Concatenate avg + max → doubles channels for fc1
+                self.pool_avg = nn.AdaptiveAvgPool2d(1)
+                self.pool_max = nn.AdaptiveMaxPool2d(1)
+            elif pool_type == "learned":
+                # 1x1 conv to learn pooling weights (H×W → 1)
+                self.pool = nn.Conv2d(out_channels, 1, kernel_size=1)
 
-        # --- SE MLP ---
-        if pool_type == "avgmax":
-            se_in = 2 * out_channels
-        else:
-            se_in = out_channels
+            # --- SE MLP ---
+            if pool_type == "avgmax":
+                se_in = 2 * out_channels
+            else:
+                se_in = out_channels
 
-        self.fc1 = nn.Linear(se_in, out_channels // reduction)
-        self.fc2 = nn.Linear(out_channels // reduction, out_channels)
+            self.fc1 = nn.Linear(se_in, out_channels // reduction)
+            self.fc2 = nn.Linear(out_channels // reduction, out_channels)
 
     def forward(self, x):
         identity = x
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.dropout(out)
-        out = self.bn2(self.conv2(out))
+        #kill 1
+        #out = self.bn2(self.conv2(out))
 
         # --- SE attention pooling ---
-        if self.pool_type == "avg":
-            w = self.pool(out).view(out.size(0), -1)
-        elif self.pool_type == "max":
-            w = self.pool(out).view(out.size(0), -1)
-        elif self.pool_type == "avgmax":
-            w_avg = self.pool_avg(out).view(out.size(0), -1)
-            w_max = self.pool_max(out).view(out.size(0), -1)
-            w = torch.cat([w_avg, w_max], dim=1)
-        elif self.pool_type == "learned":
-            # Apply learned 1x1 conv → softmax over spatial dims
-            weights = F.softmax(self.pool(out).view(out.size(0), -1), dim=1)
-            w = torch.sum(out.view(out.size(0), out.size(1), -1) * weights.unsqueeze(1), dim=-1)
+        if 0:
+            if self.pool_type == "avg":
+                w = self.pool(out).view(out.size(0), -1)
+            elif self.pool_type == "max":
+                w = self.pool(out).view(out.size(0), -1)
+            elif self.pool_type == "avgmax":
+                w_avg = self.pool_avg(out).view(out.size(0), -1)
+                w_max = self.pool_max(out).view(out.size(0), -1)
+                w = torch.cat([w_avg, w_max], dim=1)
+            elif self.pool_type == "learned":
+                # Apply learned 1x1 conv → softmax over spatial dims
+                weights = F.softmax(self.pool(out).view(out.size(0), -1), dim=1)
+                w = torch.sum(out.view(out.size(0), out.size(1), -1) * weights.unsqueeze(1), dim=-1)
 
-        # --- SE excitation ---
-        w = F.relu(self.fc1(w))
-        w = torch.sigmoid(self.fc2(w)).view(out.size(0), out.size(1), 1, 1)
-        out = out * w
+            # --- SE excitation ---
+            w = F.relu(self.fc1(w))
+            w = torch.sigmoid(self.fc2(w)).view(out.size(0), out.size(1), 1, 1)
+            out = out * w
 
         # Skip connection
         if self.proj is not None:
             identity = self.proj(identity)
-        out += identity
+        #out += identity
+        out = out+identity
         return F.relu(out)
 
 
@@ -524,10 +522,10 @@ def pearson_loss(pred, target, eps=1e-8):
     return 1 - r.mean()
 
 class main_net(nn.Module):
-    def __init__(self, in_channels=2, out_channels=3, base_channels=32,
-                 use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=1.0,
+    def __init__(self, in_channels=1, out_channels=3, base_channels=32,
+                 use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
                  use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='max', 
-                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=0,err_Mask=1,
+                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=0,
                  suffix='', dropout_1=0, dropout_2=0, dropout_3=0):
         super().__init__()
         arg_dict = locals()
@@ -543,7 +541,6 @@ class main_net(nn.Module):
         self.err_Power=err_Power
         self.err_Bisp=err_Bisp
         self.err_Cross=err_Cross
-        self.err_Mask=err_Mask
         self.rotation_prob=rotation_prob
         if 0:
             for arg in arg_dict:
@@ -564,27 +561,27 @@ class main_net(nn.Module):
         self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1)
         self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1)
         self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1)
+        #self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1)
         self.pool = nn.MaxPool2d(2)
 
         # Optional FC bottleneck
         if use_fc_bottleneck:
-            self.fc1 = nn.Linear(base_channels*8*fc_spatial*fc_spatial, fc_hidden)
-            self.fc2 = nn.Linear(fc_hidden, base_channels*8*fc_spatial*fc_spatial)
+            self.fc1 = nn.Linear(base_channels*4*fc_spatial*fc_spatial, fc_hidden)
+            self.fc2 = nn.Linear(fc_hidden, base_channels*4*fc_spatial*fc_spatial)
 
         # Learned upsampling via ConvTranspose2d
-        self.up4 = nn.ConvTranspose2d(base_channels*8, base_channels*8, kernel_size=3, stride=2, padding=1, output_padding=1)
+        #self.up4 = nn.ConvTranspose2d(base_channels*8, base_channels*8, kernel_size=3, stride=2, padding=1, output_padding=1)
         self.up3 = nn.ConvTranspose2d(base_channels*4, base_channels*4, kernel_size=3, stride=2, padding=1, output_padding=1)
         self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
 
         # Decoder with skip connections
-        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type, dropout_p=dropout_3)
+        #self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type, dropout_p=dropout_3)
         self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, pool_type=pool_type, dropout_p=dropout_3)
         self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type, dropout_p=dropout_3)
         self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
 
         # --- Multi-scale output heads ---
-        self.out_d4 = nn.Conv2d(base_channels*4, out_channels, 3, padding=1)
+        #self.out_d4 = nn.Conv2d(base_channels*4, out_channels, 3, padding=1)
         self.out_d3 = nn.Conv2d(base_channels*2, out_channels, 3, padding=1)
         self.out_d2 = nn.Conv2d(base_channels,   out_channels, 3, padding=1)
 
@@ -600,36 +597,30 @@ class main_net(nn.Module):
     def forward(self, x):
         if x.ndim == 3:
             x = x.unsqueeze(1)
-        mask = torch.isfinite(x)
-        unmask = torch.isnan(x)
-        x = torch.nan_to_num(x, nan=0.0)
-        mask_single = mask.any(dim=1, keepdim=True).float()
-        x = torch.cat([x, mask_single], dim=1)
-
 
         # Encoder
         e1 = self.enc1(x)
         e2 = self.enc2(self.pool(e1))
         e3 = self.enc3(self.pool(e2))
-        e4 = self.enc4(self.pool(e3))
+        #e4 = self.enc4(self.pool(e3))
 
         # Optional FC bottleneck
         if self.use_fc_bottleneck:
-            B, C, H, W = e4.shape
-            z = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial)).view(B, -1)
+            B, C, H, W = e3.shape
+            z = F.adaptive_avg_pool2d(e3, (self.fc_spatial, self.fc_spatial)).view(B, -1)
             z = F.relu(self.fc1(z))
             z = F.dropout(z, p=self.dropout_2, training=self.training)
             z = F.relu(self.fc2(z))
             z = F.dropout(z, p=self.dropout_2, training=self.training)
-            e4 = F.interpolate(z.view(B, C, self.fc_spatial, self.fc_spatial),
+            e3 = F.interpolate(z.view(B, C, self.fc_spatial, self.fc_spatial),
                                size=(H, W), mode='bilinear', align_corners=False)
 
         # Decoder
-        d4 = self.up4(e4)
-        d4 = torch.cat([d4, e3], dim=1)
-        d4 = self.dec4(d4)
+        #d4 = self.up4(e4)
+        #d4 = torch.cat([d4, e3], dim=1)
+        #d4 = self.dec4(d4)
 
-        d3 = self.up3(d4)
+        d3 = self.up3(e3)
         d3 = torch.cat([d3, e2], dim=1)
         d3 = self.dec3(d3)
 
@@ -640,7 +631,8 @@ class main_net(nn.Module):
         out_main = self.dec1(d2)
 
         # Multi-scale predictions
-        out_d4 = self.out_d4(d4)
+        #out_d4 = self.out_d4(d4)
+        out_d4=None
         out_d3 = self.out_d3(d3)
         out_d2 = self.out_d2(d2)
 
@@ -655,12 +647,6 @@ class main_net(nn.Module):
         preds: tuple of (out_main, out_d2, out_d3, out_d4)
         target: [B, C, H, W] ground truth
         """
-        mask = torch.isfinite(target)
-        unmask = torch.isnan(target)
-        target = torch.nan_to_num(target, nan=0.0)
-        if 0:
-            mask_single = mask.any(dim=1, keepdim=True).float()
-            x = torch.cat([x, mask_single], dim=1)
         out_main, out_d2, out_d3, out_d4 = preds
         all_loss = {}
 
@@ -671,11 +657,12 @@ class main_net(nn.Module):
         if self.err_Multi>0:
             t_d2 = F.interpolate(target, size=out_d2.shape[-2:], mode="bilinear", align_corners=False)
             t_d3 = F.interpolate(target, size=out_d3.shape[-2:], mode="bilinear", align_corners=False)
-            t_d4 = F.interpolate(target, size=out_d4.shape[-2:], mode="bilinear", align_corners=False)
+            #t_d4 = F.interpolate(target, size=out_d4.shape[-2:], mode="bilinear", align_corners=False)
 
             loss_d2   = F.l1_loss(out_d2, t_d2)
             loss_d3   = F.l1_loss(out_d3, t_d3)
-            loss_d4   = F.l1_loss(out_d4, t_d4)
+            #loss_d4   = F.l1_loss(out_d4, t_d4)
+            loss_d4=0
             loss_multi = self.err_Multi*(loss_d2+loss_d3+loss_d4)
             all_loss['L1_Multi'] = loss_multi
 
@@ -707,13 +694,6 @@ class main_net(nn.Module):
         if self.err_Bisp > 0:
             lambda_bisp = self.err_Bisp*bispectrum_crit(out_main,target)
             all_loss['Bisp'] = lambda_bisp
-        if self.err_Mask>0:
-            loss_mask =  torch.abs((out_main[:,0,:,:]*unmask[:,0,:,:])).sum()
-            loss_mask+=  torch.abs((out_main[:,1,:,:]*unmask[:,0,:,:])).sum()
-            loss_mask+=  torch.abs((out_main[:,2,:,:]*unmask[:,0,:,:])).sum()
-            loss_mask /= out_main[:,0,:,:].numel()
-
-            all_loss['Mask'] = self.err_Mask*loss_mask
 
         return all_loss
 

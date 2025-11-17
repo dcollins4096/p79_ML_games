@@ -22,8 +22,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 2000
-what = "180 with the normalizing flow head"
+idd = 2003
+what = "180 with the normalizing flow head.  Getting almost there"
 
 fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -38,8 +38,8 @@ nvalid=30
 downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-epochs  = 20
-#epochs = 200
+#epochs  = 20
+epochs = 200
 lr = 1e-3
 #lr = 1e-4
 batch_size=64
@@ -556,7 +556,7 @@ class main_net(nn.Module):
     def __init__(self, in_channels=1, out_channels=3, base_channels=32,
                  use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
                  use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='max', 
-                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Cross=1, err_Hot=2,
+                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Cross=0,
                  suffix='', dropout_1=0, dropout_2=0, dropout_3=0, use_one_hot=True,
                 rng=[0,1], num_bins=32):
         super().__init__()
@@ -574,7 +574,6 @@ class main_net(nn.Module):
         self.err_Grad=err_Grad
         self.err_Power=err_Power
         self.err_Cross=err_Cross
-        self.err_Hot = err_Hot
         self.rotation_prob=rotation_prob
         self.register_buffer("train_curve", torch.zeros(epochs))
         self.register_buffer("val_curve", torch.zeros(epochs))

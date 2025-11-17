@@ -25,13 +25,17 @@ import torch_power
 idd = 2012
 what = "2008, try to improve"
 
-fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
-fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
+#fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
+#fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
+#fname_train = "p79d_subsets_S256_N5_xyzsuite4_first.h5"
+#fname_valid = "p79d_subsets_S256_N5_xyzsuite4_second.h5"
+fname_train = "p79d_subsets_S256_N5_xyz_down_64suite4_first.h5"
+fname_valid = "p79d_subsets_S256_N5_xyz_down_64suite4_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
 #ntrain = 3000
-ntrain = 3000
+ntrain = 18000
 #ntrain = 20
 #nvalid=3
 #ntrain = 10
@@ -152,6 +156,7 @@ def trainer(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * max(1, len(train_loader))
     print("Total Steps", total_steps)
+    pdb.set_trace()
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
@@ -172,14 +177,15 @@ def trainer(
         model.err_Cross = torch.tensor(0.0)
 
 
-    for epoch in range(1, epochs+1):
+    import tqdm
+    for epoch in (range(1, epochs+1)):
         if epoch > 50 and save_err_Cross>0:
             model.err_Cross = save_err_Cross
         model.train()
         if verbose:
             print("Epoch %d"%epoch)
         running = 0.0
-        for xb, yb in train_loader:
+        for xb, yb in tqdm.tqdm(train_loader):
             xb = xb.to(device)
             yb = yb.to(device)
 

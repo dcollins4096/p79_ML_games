@@ -31,7 +31,8 @@ fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
 #ntrain = 3000
-ntrain = 3000
+#ntrain = 3000
+ntrain = 20
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -39,9 +40,9 @@ downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 20
-epochs = 10
+epochs = 200
 #lr = 1e-3
-lr = 1e-4
+lr = 1e-3
 batch_size=10
 lr_schedule=[400]
 weight_decay = 1e-3
@@ -372,6 +373,7 @@ def pearson_loss(pred, target, eps=1e-8):
 # Conditional Normalizing Flow Head for E/B prediction
 # ======================================================
 from nflows import flows, distributions, transforms
+
 class EBFlowHead(nn.Module):
     def __init__(self, in_channels, context_dim=32, hidden_features=128, num_layers=5, edge_width=8):
         super().__init__()

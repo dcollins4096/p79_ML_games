@@ -28,7 +28,7 @@ fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 1000
+ntrain = 3000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -518,7 +518,7 @@ class main_net(nn.Module):
     def __init__(self, in_channels=1, out_channels=3, base_channels=32,
                  use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
                  use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='max', 
-                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=1,
+                 err_L1=1, err_Multi=0,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=1,
                  suffix='', dropout_1=0, dropout_2=0, dropout_3=0):
         super().__init__()
         arg_dict = locals()
