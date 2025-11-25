@@ -17,6 +17,8 @@ import tqdm
 import torch_power
 from collections import defaultdict
 import hotness
+from torch.utils.data import Dataset, DataLoader
+
 
 def plot_three_flow(Eguess,Etarget,E_samples,fig=None,axs=None, title='', floating=False):
     if hasattr(Eguess, 'cpu'):
@@ -35,7 +37,8 @@ def plot_three_flow(Eguess,Etarget,E_samples,fig=None,axs=None, title='', floati
 
     ppp=axs[1].imshow(Eguess,norm=Enorm)
     fig.colorbar(ppp,ax=axs[1])
-    L2 = (((Etarget-Eguess)**2).mean())**0.5
+    #L2 = (((Etarget-Eguess)**2).mean())**0.5/Etarget.mean()
+    L2 = F.mse_loss(Etarget,Eguess)
     axs[1].set(title='%s predict %0.2e'%(title,L2), xlabel='x [pixel]', ylabel = 'y [pixel]')
 
     mean = E_samples.mean(axis=0)
@@ -43,7 +46,7 @@ def plot_three_flow(Eguess,Etarget,E_samples,fig=None,axs=None, title='', floati
     #mean = E_samples[0,...]
     #std  = E_samples[1,...]
     ppp=axs[2].imshow(mean.cpu().detach().numpy(), norm=Enorm)
-    L2 = (((Etarget-mean.cpu())**2).mean())**0.5
+    L2 = (((Etarget-mean.cpu())**2).mean())**0.5/Etarget.mean()
     axs[2].set(title='%s NF mean %0.2e'%(title,L2), xlabel='x [pixel]', ylabel = 'y [pixel]')
     fig.colorbar(ppp,ax=axs[2])
     ppp=axs[3].imshow(std.cpu().detach().numpy(), norm=None)
@@ -87,13 +90,53 @@ def plot_three_err(Eguess,Etarget,var,out_prob,mean,model,fig=None,axs=None, tit
     pch.simple_phase(E1,E2,ax=axs[5], colorbar=False)
     axs[5].plot( [Emin,Emax],[Emin,Emax],c='k')
 
+def plot_scalars(net_name,train_loader, val_loader, tst_loader, model):
 
+    subs = ['train','valid','test']
+    device = 'cuda'
+    ms_net=[]
+    ms_target=[]
+    ma_net=[]
+    ma_target=[]
+    for ns,subset in enumerate(subs):
+        mmin=20
+        mmax=-20
+        this_set = {'train':train_loader, 'valid':val_loader, 'test':tst_loader}[subset]
+        fig,ax=plt.subplots(1,2)
+
+        maxs=0
+        maxa=0
+        with torch.no_grad():
+            for xb, yb in tqdm.tqdm(this_set):
+                ms,ma = yb[1][0].cpu()
+                moo = model( xb )
+                ms_moo, ma_moo = moo[-1][0].cpu()
+                ms_net.append(ms_moo.item())
+                ma_net.append(ma_moo.item())
+                ms_target.append(ms)
+                ma_target.append(ma)
+
+                #ax[0].scatter(ms, moo[0][0].cpu())
+                #ax[1].scatter(ma, moo[0][1].cpu())
+                maxs=max([maxs,ms])
+                maxa=max([maxa,ma])
+        if len(ms_target) < 100:
+            for a,b in zip(ms_target,ms_net):
+                ax[0].scatter(a,b)
+            for a,b in zip(ma_target,ma_net):
+                ax[1].scatter(a,b)
+        else:
+            pch.simple_phase(ms_target,ms_net,ax=ax[0])
+            pch.simple_phase(ma_target,ma_net,ax=ax[1])
+
+        ax[0].plot( [0,maxs],[0,maxs])
+        ax[1].plot( [0,maxa],[0,maxa])
+        fig.savefig('%s/plots/%s_scalars_%s'%(os.environ['HOME'],net_name,subset))
 
     
 
 
 def plot_three(Eguess,Etarget,fig=None,axs=None, title='', floating=False):
-    print(Eguess.shape)
     if hasattr(Eguess, 'cpu'):
         Eguess=Eguess.cpu()
     if hasattr(Etarget,'cpu'):
@@ -109,9 +152,10 @@ def plot_three(Eguess,Etarget,fig=None,axs=None, title='', floating=False):
     ppp=axs[0].imshow(Etarget,norm=Enorm)
     #fig.colorbar(ppp,ax=axs[0])
     axs[0].set(title='%s actual'%title, xlabel='x [pixel]', ylabel = 'y [pixel]')
+    L2 = F.mse_loss(Etarget,Eguess)
     ppp=axs[1].imshow(Eguess,norm=Enorm)
     #fig.colorbar(ppp,ax=axs[1])
-    axs[1].set(title='%s predict'%title, xlabel='x [pixel]', ylabel = 'y [pixel]')
+    axs[1].set(title='%s predict %0.2e'%(title,L2), xlabel='x [pixel]', ylabel = 'y [pixel]')
     er = pearsonr( Eguess.flatten(), Etarget.flatten())[0]
     #fig.colorbar(ppp,ax=axs[2])
     axs[2].set(title='pearson %0.4f'%er)
@@ -149,63 +193,51 @@ def plot_loss_curve(net_name,model, suffix):
     plt.savefig("%s/plots/%s_%s_err_time.png"%(os.environ['HOME'], net_name, suffix))
 
 
-
-def plot1(net_name,model, all_data, suffix, erronly=True):
+def plot1(net_name,model, all_data, suffix, subset = 'test', erronly=True):
     do_bispectrum=False
     net = importlib.import_module(f"networks.{net_name}")
 
     plot_loss_curve(net_name, model, suffix)
 
-    ds_train = net.SphericalDataset(all_data['train'].to('cpu'))
-    #ds_val   = net.SphericalDataset(all_data['valid'].to('cpu'))
-    #ds_tst   = net.SphericalDataset(all_data['test'].to('cpu'))
-    ds_val = None
-    ds_tst = None
+    if hasattr(model, "predict_scalars"):
+        ds_train = net.SphericalDataset(all_data['train'].to('cpu'), all_data['quantities']['train'])
+        ds_val   = net.SphericalDataset(all_data['valid'].to('cpu'), all_data['quantities']['valid'])
+        ds_tst   = net.SphericalDataset(all_data['test'].to('cpu'), all_data['quantities']['test'])
+    else:
+        ds_train = net.SphericalDataset(all_data['train'].to('cpu'))
+        ds_val   = net.SphericalDataset(all_data['valid'].to('cpu'))
+        ds_tst   = net.SphericalDataset(all_data['test'].to('cpu'))
+
+    train_loader = DataLoader(ds_train, batch_size=1, shuffle=False, drop_last=False)
+    val_loader   = DataLoader(ds_val,   batch_size=1, shuffle=False, drop_last=False)
+    tst_loader   = DataLoader(ds_tst,   batch_size=1, shuffle=False, drop_last=False)
+                                
+
+    #ds_val = None
+    #ds_tst = None
     device = 'cuda'
     model = model.to(device)
 
     #this_set = ds_val
-    subset = 'train'
+    #subset = 'train'
     if subset == 'test':
-        this_set = ds_tst
+        this_set = tst_loader
         subs=['test']
     elif subset == 'train':
-        this_set = ds_train
+        this_set = train_loader
         subs=['train']
     elif subset == 'valid':
-        this_set = ds_val
+        this_set = val_loader
         subs = ['valid']
 
     Nsamples=10
     print('Subset',subset, 'nsamples',Nsamples)
     error_list = defaultdict(list)
     with torch.no_grad():
-        for n in tqdm.tqdm(range(len(this_set))):
-            if n >50000:
-                if 'kludge' not in dir():
-                    kludge = True
-                    print("KLUDGE for speed")
-                continue
-            Tmode = this_set[n][0]
-            if len(Tmode.shape) == 3:
-                Tmode = Tmode.squeeze(0)
-            moo = model( Tmode.unsqueeze(0).to(device), return_features=True)
+        for xb,yb in tqdm.tqdm(this_set):
+            moo = model( xb )
 
-            if type(moo) == tuple:
-                #moo = [mmm.cpu() for mmm in moo]
-                nchannels = moo[0].shape[1]
-                if nchannels == 2 or nchannels == 3:
-                    EB = this_set[n][1]
-                else:
-                    EB = this_set[n][1][0:1]
-            else:
-                #moo = moo.cpu()
-                if moo[0].shape[1] == 2:
-                    EB = this_set[n]
-                else:
-                    EB = this_set[n][1]
-
-            err_dict= model.criterion1(moo,EB.unsqueeze(0).to(device))
+            err_dict= model.criterion1(moo,yb)
             for err in err_dict:
                 error_list[err].append(err_dict[err].item())
             error_list['total'].append( sum(err_dict.values()).item())
@@ -226,24 +258,23 @@ def plot1(net_name,model, all_data, suffix, erronly=True):
     #subs = ['train','valid','test']
     #subs = ['test','valid', 'train']
     #subs = ['valid']
+    if hasattr( model, 'predict_scalars'):
+        plot_scalars(net_name,train_loader, val_loader, tst_loader,model)
     for ns,subset in enumerate(subs):
         mmin=20
         mmax=-20
-        this_set = {'train':ds_train, 'valid':ds_val, 'test':ds_tst}[subset]
-        #args = np.argsort(error_list['Power'])
-        #N = len(args)
-        #dothese = {'valid':[12,20], 'test':[0,1], 'train':range(10)}[subset]
-        #args[0],args[int(0.25*N)], args[int(0.5*N)], args[int(0.75*N)],args[-1]
-        #    #dothese = np.where( np.array(error_list['Power'] ) > 2)[0]
+        this_set = {'train':train_loader, 'valid':val_loader, 'test':tst_loader}[subset]
         if subset == 'test':
             ppp = np.argsort(error_list['total'])
             dothese = list( ppp[::ppp.size//30])
-            dothese = ppp[:3]
+            #dothese = ppp[:3]
         elif subset == 'valid':
             dothese = range(len(this_set))
         elif subset == 'train':
-            dothese = range( min([30, len(this_set)]))
-
+            #dothese = range( min([30, len(this_set)]))
+            ppp = np.argsort(error_list['total'])
+            #dothese = list( ppp[::ppp.size//30])
+            dothese = range(len(this_set))
             
             #dothese = ppp[::50]
             #dothese = [ 939, 627, 448,1107, 543] +list( ppp[::ppp.size//30])
@@ -251,34 +282,32 @@ def plot1(net_name,model, all_data, suffix, erronly=True):
         print("DO", dothese)
 
         with torch.no_grad():
-            for i,n in tqdm.tqdm(enumerate(dothese)):
-                Tmode = this_set[n][0]
-                if len(Tmode.shape) == 3:
-                    Tmode = Tmode.squeeze(0)
-                moo = model( Tmode.unsqueeze(0).to(device), return_features=True)
+            for n, (xb,yb) in tqdm.tqdm(enumerate(this_set)):
+                if n not in dothese:
+                    continue
+                moo = model( xb)
                 EB_samples=None
                 if hasattr(model, 'flow_head'):
                     #res_samples = model.flow_head.sample_n(moo[1], n_samples=100)   # [K,B,2,H,W]
                     #EB_samples = res_samples + model(Tmode.unsqueeze(0).to(net.device), return_features=False)[1]  # add back predicted EB
                     EB_samples = model.flow_head.sample_n(moo[1], n_samples=Nsamples)
-                if type(moo) == tuple:
-                    EBguess = moo[0].cpu().squeeze(0)
-                    EB = this_set[n][1]
                 else:
-                    EBguess = moo.squeeze(0)
-                    EB = this_set[n][1]
+
+                    moo = model( xb)
+                EB = yb[0][0]
+                EBguess = moo[0][0]
 
                 if EB_samples is not None:
                     fig,axes=plt.subplots(3,5,figsize=(15,8))
                     ax0,ax1,ax2=axes
                     fig.tight_layout()
-                    fig.savefig('%s/plots/%s_%s_%s_%04d.png'%(os.environ['HOME'],net_name,suffix,subset,i))
+                    fig.savefig('%s/plots/%s_%s_%s_%04d.png'%(os.environ['HOME'],net_name,suffix,subset,n))
                     plt.close(fig)
                     plot_three_flow(EBguess[0,:,:], EB[0,:,:], EB_samples[:,0,0,:,:],title='T', axs=ax0, fig=fig)
                     plot_three_flow(EBguess[1,:,:], EB[1,:,:], EB_samples[:,0,1,:,:],title='E', axs=ax1, fig=fig)
                     plot_three_flow(EBguess[2,:,:], EB[2,:,:], EB_samples[:,0,2,:,:],title='B', axs=ax2, fig=fig)
                     fig.tight_layout()
-                    fig.savefig('%s/plots/%s_%s_%s_%04d.png'%(os.environ['HOME'],net_name,suffix,subset,i))
+                    fig.savefig('%s/plots/%s_%s_%s_%04d.png'%(os.environ['HOME'],net_name,suffix,subset,n))
                     plt.close(fig)
                 else:
                     fig,axes=plt.subplots(3,5,figsize=(15,8))
@@ -297,7 +326,7 @@ def plot1(net_name,model, all_data, suffix, erronly=True):
                         plot_three(EBguess[1,:,:], EB[1,:,:],title='B', axs=ax2, fig=fig)
 
                     fig.tight_layout()
-                    fig.savefig('%s/plots/%s_%s_%s_%04d.png'%(os.environ['HOME'],net_name,suffix,subset,i))
+                    fig.savefig('%s/plots/%s_%s_%s_%04d.png'%(os.environ['HOME'],net_name,suffix,subset,n))
                     plt.close(fig)
 
     return model
