@@ -44,8 +44,8 @@ nvalid=30
 downsample = False
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-epochs  = 50
-#epochs = 200
+#epochs  = 10
+epochs = 200
 #lr = 1e-3
 lr = 1e-3
 batch_size=10
@@ -508,38 +508,107 @@ class EBFlowHead(nn.Module):
             samples = samples.reshape(B, H, W, 3).permute(0, 3, 1, 2)
             return samples
 
-    def sample_n(self, features, n_samples=50):
+    @torch.no_grad()
+    def sample_n_0(self, features, n_samples=50):
         """
         Draw n_samples Monte Carlo samples from p(E,B | x) in a single batch.
 
-        features:  [B, C, H, W]  – encoder features
+        features:  [B, C, H, W]  – decoder features
         n_samples: int           – number of samples to draw per pixel
 
         Returns:
-            samples: [n_samples, B, 2, H, W]
+            samples: [n_samples, B, 3, H, W]
         """
         B, C, H, W = features.shape
+        device = features.device
+
+        # Add coordinates
         yy, xx = torch.meshgrid(
-                torch.linspace(-1,1,H,device=features.device),
-                torch.linspace(-1,1,W,device=features.device), indexing="ij"
+            torch.linspace(-1, 1, H, device=device),
+            torch.linspace(-1, 1, W, device=device),
+            indexing="ij"
         )
         coords = torch.stack([xx, yy]).expand(B, -1, H, W)
         features = torch.cat([features, coords], dim=1)
-        context = self.context_net(features).permute(0, 2, 3, 1).reshape(-1, self.context_dim)
 
-        n_pix = B * H * W
-        z = self.base.sample(n_samples * n_pix)
-        z = z.view(n_samples * n_pix, -1)
-        context_rep = context.repeat(n_samples, 1)
+        # Context: [B, context_dim, H, W] → [B*H*W, context_dim]
+        context = self.context_net(features)
+        context = context.permute(0, 2, 3, 1).reshape(-1, self.context_dim)  # [n_pix, context_dim]
+        n_pix = context.shape[0]
 
-        # Invert the flow transform
+        # Base samples: [n_samples * n_pix, 3]
+        z = self.base.sample(n_samples * n_pix).view(-1, 3)
+
+        # Broadcast context without allocating n_samples copies
+        context_rep = context.unsqueeze(0).expand(n_samples, -1, -1).reshape(-1, self.context_dim)
+
+        # Invert the flow
         samples, _ = self.flow._transform.inverse(z, context=context_rep)
 
-        # Reshape to [n_samples, B, 2, H, W]
-        samples = samples.view(n_samples, B, H, W, 3).permute(0, 1, 4, 2, 3)
+        # [n_samples*n_pix, 3] → [n_samples, B, H, W, 3] → [n_samples, B, 3, H, W]
+        samples = samples.view(n_samples, B, H, W, 3).permute(0, 1, 4, 2, 3).contiguous()
         return samples
+    @torch.no_grad()
+    def sample_n(self, features, n_samples=50, max_points_per_batch=200_000):
+        """
+        Draw n_samples Monte Carlo samples from p(E,B | x) in chunks to save memory.
 
-        
+        features:  [B, C, H, W]
+        n_samples: number of samples per pixel
+        max_points_per_batch: max (n_samples * n_pix_chunk) handled at once
+
+        Returns:
+            [n_samples, B, 3, H, W]
+        """
+        B, C, H, W = features.shape
+        device = features.device
+
+        # Add coordinates
+        yy, xx = torch.meshgrid(
+            torch.linspace(-1, 1, H, device=device),
+            torch.linspace(-1, 1, W, device=device),
+            indexing="ij"
+        )
+        coords = torch.stack([xx, yy]).expand(B, -1, H, W)
+        features = torch.cat([features, coords], dim=1)
+
+        # Context: [B, context_dim, H, W] → [B*H*W, context_dim]
+        context = self.context_net(features)
+        context = context.permute(0, 2, 3, 1).reshape(-1, self.context_dim)  # [n_pix, context_dim]
+        n_pix = context.shape[0]
+
+        # Pre-allocate output [n_samples, n_pix, 3]
+        samples_all = torch.empty(n_samples, n_pix, 3, device=device)
+
+        # Decide chunk size over pixels
+        # We want: n_samples * n_pix_chunk <= max_points_per_batch
+        pix_chunk = max_points_per_batch // n_samples
+        pix_chunk = max(1, pix_chunk)
+
+        for start in range(0, n_pix, pix_chunk):
+            end = min(start + pix_chunk, n_pix)
+            m = end - start
+
+            ctx_chunk = context[start:end]  # [m, context_dim]
+
+            # Base samples: [n_samples, m, 3]
+            z = self.base.sample(n_samples* m)   # nflows StandardNormal supports shape tuples
+            z = z.view(-1, 3)                      # [n_samples*m, 3]
+
+            # Broadcast context without copying
+            ctx_rep = ctx_chunk.unsqueeze(0).expand(n_samples, -1, -1).reshape(-1, self.context_dim)
+
+            # Invert transform on this chunk
+            chunk_samples, _ = self.flow._transform.inverse(z, context=ctx_rep)
+            chunk_samples = chunk_samples.view(n_samples, m, 3)
+
+            samples_all[:, start:end, :] = chunk_samples
+
+        # Reshape to [n_samples, B, 3, H, W]
+        samples_all = samples_all.view(n_samples, B, H, W, 3).permute(0, 1, 4, 2, 3).contiguous()
+        return samples_all
+
+            
 class ResidualBlockSE(nn.Module):
     def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0):
         super().__init__()

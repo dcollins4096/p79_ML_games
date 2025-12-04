@@ -20,25 +20,26 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 184
-what = "180 with capacity.  DO NOT CHANGE."
+idd = 3000
+what = "184 but predict Ms and Ma"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
-fname_train = "p79d_subsets_S256_N5_xyz_down_64suite4_first.h5"
-fname_valid = "p79d_subsets_S256_N5_xyz_down_64suite4_second.h5"
+fname_train = "p79d_subsets_S256_N5_xyz_down_64fixed_mach_QU_first.h5"
+fname_valid = "p79d_subsets_S256_N5_xyz_down_64fixed_mach_QU_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 18000
+ntrain = 10000
 #nvalid=3
 #ntrain = 10
 nvalid=30
+ntest = 5000
 downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 20
-epochs = 50
+epochs = 500
 lr = 1e-3
 #lr = 1e-4
 batch_size=64
@@ -50,7 +51,7 @@ def load_data():
     print('read the data')
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
     valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
-    all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'], 'quantities':{}}
+    all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'][:ntest], 'quantities':{}}
     all_data['quantities']['train']=train['quantities']['train']
     all_data['quantities']['valid']=valid['quantities']['valid']
     all_data['quantities']['test']=valid['quantities']['test']
@@ -92,7 +93,7 @@ def downsample_avg(x, M):
 import torchvision.transforms.functional as TF
 import random
 class SphericalDataset(Dataset):
-    def __init__(self, all_data, quan rotation_prob = 0.0):
+    def __init__(self, all_data, quan, rotation_prob = 0.0):
         self.rotation_prob = rotation_prob
         self.quan=quan
         if downsample:
@@ -105,9 +106,9 @@ class SphericalDataset(Dataset):
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
         theset = self.all_data[idx]
-        ms = self.quan['Ms_act']
-        ma = self.quan['Ma_act']
-        return theset[0], torch.tensor([ms,ma])
+        ms = self.quan['Ms_act'][idx]
+        ma = self.quan['Ma_act'][idx]
+        return theset[0], torch.tensor([ms,ma], dtype=torch.float32)
 
 # ---------------------------
 # Utils
@@ -137,7 +138,7 @@ def trainer(
     set_seed()
 
     ds_train = SphericalDataset(all_data['train'],all_data['quantities']['train'], rotation_prob=model.rotation_prob)
-    ds_val   = SphericalDataset(all_data['valid'],all_data['quantities']['valid'],, rotation_prob=model.rotation_prob)
+    ds_val   = SphericalDataset(all_data['valid'],all_data['quantities']['valid'], rotation_prob=model.rotation_prob)
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader   = DataLoader(ds_val,   batch_size=max(64, batch_size), shuffle=False, drop_last=False)
 
@@ -587,9 +588,9 @@ class main_net(nn.Module):
         if use_cross_attention:
             self.cross_attn = CrossAttention(out_channels, num_heads=attn_heads)
 
-         if self.predict_scalars:
-             in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
-             self.fc_out = nn.Linear(in_dim, self.n_scalars)
+        if self.predict_scalars:
+            in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
+            self.fc_out = nn.Linear(in_dim, self.n_scalars)
 
 
         self.register_buffer("train_curve", torch.zeros(epochs))
@@ -660,6 +661,11 @@ class main_net(nn.Module):
         preds: tuple of (out_main, out_d2, out_d3, out_d4)
         target: [B, C, H, W] ground truth
         """
+
+        if self.predict_scalars:
+            losses = self.criterion2(preds,target)
+            return losses
+
         out_main, out_d2, out_d3, out_d4 = preds
         all_loss = {}
 
@@ -712,11 +718,7 @@ class main_net(nn.Module):
     def criterion2(self,preds,target):
         return {'mse':F.mse_loss(preds, target)}
     def criterion(self, preds, target):
-        if self.predict_scalars:
-            loss = self.criterion2(preds,target)
-
-        else:
-            losses = self.criterion1(preds,target)
+        losses = self.criterion1(preds,target)
 
         return sum(losses.values())
 

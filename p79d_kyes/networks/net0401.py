@@ -20,40 +20,37 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 500
-what = "from 406/181 with dilation"
+idd = 401
+what = "184 with different loss structure, more bottleneck"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
-fname_train = "p79d_subsets_S256_N5_xyz_down_64suite4_QU__first.h5"
-fname_valid = "p79d_subsets_S256_N5_xyz_down_64suite4_QU__second.h5"
+fname_train = "p79d_subsets_S256_N5_xyz_down_64suite4_first.h5"
+fname_valid = "p79d_subsets_S256_N5_xyz_down_64suite4_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 1000
+ntrain = 18000
 #nvalid=3
 #ntrain = 10
 nvalid=30
-downsample = False
+downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-epochs  = 100
+epochs  = 20
 #epochs = 50
 lr = 1e-3
 #lr = 1e-4
 batch_size=64
-lr_schedule=[50]
-weight_decay = 1e-4
+lr_schedule=[100]
+weight_decay = 0
 fc_bottleneck=True
 def load_data():
 
     print('read the data')
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
     valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
-    train_long = torch.cat([train['train'], valid['test'][:12000]])
-    test = valid['test'][12000:]
-    all_data={'train':train_long,'valid':valid['valid'], 'test':test, 'quantities':{}}
-
+    all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'], 'quantities':{}}
     all_data['quantities']['train']=train['quantities']['train']
     all_data['quantities']['valid']=valid['quantities']['valid']
     all_data['quantities']['test']=valid['quantities']['test']
@@ -95,13 +92,12 @@ def downsample_avg(x, M):
 import torchvision.transforms.functional as TF
 import random
 class SphericalDataset(Dataset):
-    def __init__(self, all_data, rotation_prob = 0.0, noise=0.0):
+    def __init__(self, all_data, rotation_prob = 0.0):
         self.rotation_prob = rotation_prob
         if downsample:
             self.all_data=downsample_avg(all_data,downsample)
         else:
             self.all_data=all_data
-        self.noise=noise
     def __len__(self):
         return self.all_data.size(0)
 
@@ -111,12 +107,7 @@ class SphericalDataset(Dataset):
         if random.uniform(0,1) < self.rotation_prob:
             angle = random.uniform(-90,90)
             theset = TF.rotate(theset,angle)
-        x = theset[0]
-        y = theset
-        if self.noise>0:
-            x = x + self.noise*torch.randn_like(x)
-
-        return x,y
+        return theset[0], theset
 
 # ---------------------------
 # Utils
@@ -145,7 +136,7 @@ def trainer(
 ):
     set_seed()
 
-    ds_train = SphericalDataset(all_data['train'], rotation_prob=model.rotation_prob, noise=0.0)
+    ds_train = SphericalDataset(all_data['train'], rotation_prob=model.rotation_prob)
     ds_val   = SphericalDataset(all_data['valid'], rotation_prob=model.rotation_prob)
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader   = DataLoader(ds_val,   batch_size=max(64, batch_size), shuffle=False, drop_last=False)
@@ -163,7 +154,7 @@ def trainer(
 
     best_val = float("inf")
     best_state = None
-    patience = epochs
+    patience = 25
     bad_epochs = 0
 
     train_curve, val_curve = [], []
@@ -267,14 +258,15 @@ def trainer(
         if nowdate.day - etad.day != 0:
             print('tomorrow')
 
-        if bad_epochs >= patience:
+        if bad_epochs >= patience and False:
             print(f"Early stopping at epoch {epoch}. Best val {best_val:.4f}.")
-            break
+            print('disabled')
+            #break
 
-    # restore best
-    if best_state is not None:
-        model.load_state_dict(best_state)
     return model
+    # restore best
+    #if best_state is not None:
+    #    model.load_state_dict(best_state)
 
     # quick plot (optional)
 
@@ -345,23 +337,17 @@ def error_real_imag(guess,target):
     L1 += F.l1_loss(guess.imag, target.imag)
     return L1
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class ResidualBlockSE(nn.Module):
-    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg",
-                 dropout_p=0.0, dilation=1):
+    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0):
         super().__init__()
-
-
-        self.dilation = dilation
-
-        k = 3
-        p = dilation  # to keep H,W the same with 3x3+dilation
-
-        self.conv1 = nn.Conv2d(in_channels, out_channels, k,
-                               padding=p, dilation=dilation)
-        self.bn1   = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, k,
-                               padding=p, dilation=dilation)
-        self.bn2   = nn.BatchNorm2d(out_channels)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.dropout = nn.Dropout2d(p=dropout_p) 
 
@@ -377,9 +363,11 @@ class ResidualBlockSE(nn.Module):
         elif pool_type == "max":
             self.pool = nn.AdaptiveMaxPool2d(1)
         elif pool_type == "avgmax":
+            # Concatenate avg + max → doubles channels for fc1
             self.pool_avg = nn.AdaptiveAvgPool2d(1)
             self.pool_max = nn.AdaptiveMaxPool2d(1)
         elif pool_type == "learned":
+            # 1x1 conv to learn pooling weights (H×W → 1)
             self.pool = nn.Conv2d(out_channels, 1, kernel_size=1)
 
         # --- SE MLP ---
@@ -407,6 +395,7 @@ class ResidualBlockSE(nn.Module):
             w_max = self.pool_max(out).view(out.size(0), -1)
             w = torch.cat([w_avg, w_max], dim=1)
         elif self.pool_type == "learned":
+            # Apply learned 1x1 conv → softmax over spatial dims
             weights = F.softmax(self.pool(out).view(out.size(0), -1), dim=1)
             w = torch.sum(out.view(out.size(0), out.size(1), -1) * weights.unsqueeze(1), dim=-1)
 
@@ -415,6 +404,7 @@ class ResidualBlockSE(nn.Module):
         w = torch.sigmoid(self.fc2(w)).view(out.size(0), out.size(1), 1, 1)
         out = out * w
 
+        # Skip connection
         if self.proj is not None:
             identity = self.proj(identity)
         out += identity
@@ -565,10 +555,10 @@ class main_net(nn.Module):
         #self.use_cross_attention = use_cross_attention
 
         # Encoder
-        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1, dilation=1)
-        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1, dilation=2)
-        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1, dilation=4)
-        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1, dilation=8)
+        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1)
+        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1)
+        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1)
+        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1)
         self.pool = nn.MaxPool2d(2)
 
         # Optional FC bottleneck
@@ -582,9 +572,9 @@ class main_net(nn.Module):
         self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
 
         # Decoder with skip connections
-        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type, dropout_p=dropout_3, dilation=4)
-        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, pool_type=pool_type, dropout_p=dropout_3, dilation=2)
-        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type, dropout_p=dropout_3, dilation=1)
+        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type, dropout_p=dropout_3)
+        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, pool_type=pool_type, dropout_p=dropout_3)
+        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type, dropout_p=dropout_3)
         self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
 
         # --- Multi-scale output heads ---

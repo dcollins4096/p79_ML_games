@@ -21,14 +21,16 @@ import torch_power
 
 
 idd = 184
-what = "180 with capacity"
+what = "180 with capacity.  DO NOT CHANGE."
 
-fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
-fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
+#fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
+#fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
+fname_train = "p79d_subsets_S256_N5_xyz_down_64suite4_first.h5"
+fname_valid = "p79d_subsets_S256_N5_xyz_down_64suite4_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 1000
+ntrain = 18000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -36,7 +38,7 @@ downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 20
-epochs = 200
+epochs = 50
 lr = 1e-3
 #lr = 1e-4
 batch_size=64
@@ -171,7 +173,8 @@ def trainer(
         if verbose:
             print("Epoch %d"%epoch)
         running = 0.0
-        for xb, yb in train_loader:
+        import tqdm
+        for xb, yb in tqdm.tqdm(train_loader):
             xb = xb.to(device)
             yb = yb.to(device)
 

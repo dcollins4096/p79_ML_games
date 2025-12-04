@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 500
-what = "from 406/181 with dilation"
+idd = 406
+what = "401 Q and U"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -345,23 +345,17 @@ def error_real_imag(guess,target):
     L1 += F.l1_loss(guess.imag, target.imag)
     return L1
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 class ResidualBlockSE(nn.Module):
-    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg",
-                 dropout_p=0.0, dilation=1):
+    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0):
         super().__init__()
-
-
-        self.dilation = dilation
-
-        k = 3
-        p = dilation  # to keep H,W the same with 3x3+dilation
-
-        self.conv1 = nn.Conv2d(in_channels, out_channels, k,
-                               padding=p, dilation=dilation)
-        self.bn1   = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, k,
-                               padding=p, dilation=dilation)
-        self.bn2   = nn.BatchNorm2d(out_channels)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.dropout = nn.Dropout2d(p=dropout_p) 
 
@@ -377,9 +371,11 @@ class ResidualBlockSE(nn.Module):
         elif pool_type == "max":
             self.pool = nn.AdaptiveMaxPool2d(1)
         elif pool_type == "avgmax":
+            # Concatenate avg + max → doubles channels for fc1
             self.pool_avg = nn.AdaptiveAvgPool2d(1)
             self.pool_max = nn.AdaptiveMaxPool2d(1)
         elif pool_type == "learned":
+            # 1x1 conv to learn pooling weights (H×W → 1)
             self.pool = nn.Conv2d(out_channels, 1, kernel_size=1)
 
         # --- SE MLP ---
@@ -407,6 +403,7 @@ class ResidualBlockSE(nn.Module):
             w_max = self.pool_max(out).view(out.size(0), -1)
             w = torch.cat([w_avg, w_max], dim=1)
         elif self.pool_type == "learned":
+            # Apply learned 1x1 conv → softmax over spatial dims
             weights = F.softmax(self.pool(out).view(out.size(0), -1), dim=1)
             w = torch.sum(out.view(out.size(0), out.size(1), -1) * weights.unsqueeze(1), dim=-1)
 
@@ -415,6 +412,7 @@ class ResidualBlockSE(nn.Module):
         w = torch.sigmoid(self.fc2(w)).view(out.size(0), out.size(1), 1, 1)
         out = out * w
 
+        # Skip connection
         if self.proj is not None:
             identity = self.proj(identity)
         out += identity
@@ -565,10 +563,10 @@ class main_net(nn.Module):
         #self.use_cross_attention = use_cross_attention
 
         # Encoder
-        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1, dilation=1)
-        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1, dilation=2)
-        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1, dilation=4)
-        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1, dilation=8)
+        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1)
+        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1)
+        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1)
+        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1)
         self.pool = nn.MaxPool2d(2)
 
         # Optional FC bottleneck
@@ -582,9 +580,9 @@ class main_net(nn.Module):
         self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
 
         # Decoder with skip connections
-        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type, dropout_p=dropout_3, dilation=4)
-        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, pool_type=pool_type, dropout_p=dropout_3, dilation=2)
-        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type, dropout_p=dropout_3, dilation=1)
+        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type, dropout_p=dropout_3)
+        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, pool_type=pool_type, dropout_p=dropout_3)
+        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type, dropout_p=dropout_3)
         self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
 
         # --- Multi-scale output heads ---
