@@ -25,8 +25,19 @@ what = "3001 with only yhat and H"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
-fname_train = "p79d_subsets_S256_N5_y__down_64THQU_first.h5"
-fname_valid = "p79d_subsets_S256_N5_y__down_64THQU_second.h5"
+
+#fname_train = "p79d_subsets_S256_N5_y__down_64THQU_first.h5"
+#fname_valid = "p79d_subsets_S256_N5_y__down_64THQU_second.h5"
+
+#fname_train = "p79d_subsets_S512_N3_xyz__down_128THQU_annfix_first.h5"
+#fname_valid = "p79d_subsets_S512_N3_xyz__down_128THQU_annfix_second.h5"
+
+#fname_train = "p79d_subsets_S512_N3_xyz_THQU_annfix_first.h5"
+#fname_valid = "p79d_subsets_S512_N3_xyz_THQU_annfix_second.h5"
+
+fname_train = "p79d_subsets_S512_N1_xyz_THQU_annfix_first.h5"
+fname_valid = "p79d_subsets_S512_N1_xyz_THQU_annfix_second.h5"
+
 
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
@@ -40,7 +51,7 @@ downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 20
-epochs = 10
+epochs = 50
 lr = 1e-3
 #lr = 1e-4
 batch_size=64
@@ -106,7 +117,10 @@ class SphericalDataset(Dataset):
 
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
-        theset = self.all_data[idx]
+        H, W = self.all_data[0][0].shape
+        dy = torch.randint(0, H, (1,)).item()
+        dx = torch.randint(0, W, (1,)).item()
+        theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
         ms = self.quan['Ms_act'][idx]
         ma = self.quan['Ma_act'][idx]
         the_target = torch.stack([theset[0], theset[2], theset[3]]).to(device)
