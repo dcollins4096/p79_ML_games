@@ -20,7 +20,7 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3113  
+idd = 3200
 what = "3110 with flow head"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
