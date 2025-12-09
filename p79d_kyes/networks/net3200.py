@@ -644,8 +644,35 @@ class main_net(nn.Module):
             B, C, H, W = e4.shape
             feat = F.adaptive_avg_pool2d(e4, 1).view(B, -1)
 
+        if self.predict_scalars:
             # Return [B, n_scalars] instead of images
-        return self.fc_out(feat)
+            return self.fc_out(feat)
+
+        # Decoder
+        d4 = self.up4(e4)
+        d4 = torch.cat([d4, e3], dim=1)
+        d4 = self.dec4(d4)
+
+        d3 = self.up3(d4)
+        d3 = torch.cat([d3, e2], dim=1)
+        d3 = self.dec3(d3)
+
+        d2 = self.up2(d3)
+        d2 = torch.cat([d2, e1], dim=1)
+        d2 = self.dec2(d2)
+
+        out_main = self.dec1(d2)
+
+        # Multi-scale predictions
+        out_d4 = self.out_d4(d4)
+        out_d3 = self.out_d3(d3)
+        out_d2 = self.out_d2(d2)
+
+        if self.use_cross_attention:
+            out_main = self.cross_attn(out_main)
+
+        return out_main, out_d2, out_d3, out_d4
+
 
     def criterion1(self, preds, target):
         """
@@ -657,6 +684,54 @@ class main_net(nn.Module):
             losses = self.criterion2(preds,target)
             return losses
 
+        out_main, out_d2, out_d3, out_d4 = preds
+        all_loss = {}
+
+        # Downsample target to match each prediction
+        if self.err_L1>0:
+            loss_main = F.l1_loss(out_main, target)
+            all_loss['L1_0']=self.err_L1*loss_main
+        if self.err_Multi>0:
+            t_d2 = F.interpolate(target, size=out_d2.shape[-2:], mode="bilinear", align_corners=False)
+            t_d3 = F.interpolate(target, size=out_d3.shape[-2:], mode="bilinear", align_corners=False)
+            t_d4 = F.interpolate(target, size=out_d4.shape[-2:], mode="bilinear", align_corners=False)
+
+            loss_d2   = F.l1_loss(out_d2, t_d2)
+            loss_d3   = F.l1_loss(out_d3, t_d3)
+            loss_d4   = F.l1_loss(out_d4, t_d4)
+            loss_multi = self.err_Multi*(loss_d2+loss_d3+loss_d4)
+            all_loss['L1_Multi'] = loss_multi
+
+        # Weighted sum (more weight on full-res output)
+        if self.err_SSIM > 0:
+            ssim_t  = ssim_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
+            ssim_e  = ssim_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
+            ssim_b  = ssim_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
+            lambda_ssim = self.err_SSIM*(ssim_e+ssim_b+ssim_t)/3
+            all_loss['SSIM']=lambda_ssim
+        if self.err_Grad > 0:
+            grad_t  = gradient_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
+            grad_e  = gradient_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
+            grad_b  = gradient_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
+            lambda_grad = self.err_Grad*(grad_e+grad_b+grad_t)/3
+            all_loss['Grad']=lambda_grad
+        if self.err_Pear > 0:
+            pear_t  = pearson_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
+            pear_e  = pearson_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
+            pear_b  = pearson_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
+            lambda_pear = self.err_Pear*(pear_e+pear_b+pear_t)/3
+            all_loss['Pear']=lambda_pear
+        if self.err_Power > 0:
+            lambda_power = self.err_Power*power_spectra_crit(out_main, target)
+            all_loss['Power'] = lambda_power
+        if self.err_Cross > 0:
+            lambda_cross = self.err_Cross*cross_spectra_crit(out_main, target)
+            all_loss['Cross'] = lambda_cross
+        if self.err_Bisp > 0:
+            lambda_bisp = self.err_Bisp*bispectrum_crit(out_main,target)
+            all_loss['Bisp'] = lambda_bisp
+
+        return all_loss
 
     def criterion2(self,preds,target):
         return {'mse':F.mse_loss(preds, target)}
