@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3105
-what = "3100 with shifter.  Pretty good."
+idd = 3110
+what = "3105 horse around with dilation"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -33,7 +33,6 @@ fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
 fname_train = "p79d_subsets_S512_N3_xyz_T_odd.h5"
 fname_valid = "p79d_subsets_S512_N3_xyz_T_even.h5"
-pdb.set_trace()
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
@@ -45,13 +44,13 @@ ntest = 5000
 downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-#epochs  = 20
-epochs = 50
-lr = 1e-3
+#epochs  = 1e6
+epochs = 500
+lr = 0.5e-3
 #lr = 1e-4
 batch_size=64
-lr_schedule=[100]
-weight_decay = 1e-3
+lr_schedule=[1000]
+weight_decay = 1e-2
 fc_bottleneck=True
 def load_data():
 
@@ -59,7 +58,6 @@ def load_data():
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
     valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
     all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'][:ntest], 'quantities':{}}
-    pdb.set_trace()
     all_data['quantities']['train']=train['quantities']['train']
     all_data['quantities']['valid']=valid['quantities']['valid']
     all_data['quantities']['test']=valid['quantities']['test']
@@ -68,7 +66,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
+    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)#, dropout_1=0.3, dropout_2=0.3, dropout_3=0.3)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -167,7 +165,8 @@ def trainer(
 
     best_val = float("inf")
     best_state = None
-    patience = 25
+    load_best = False
+    patience = 1e6
     bad_epochs = 0
 
     train_curve, val_curve = [], []
@@ -276,7 +275,7 @@ def trainer(
             break
 
     # restore best
-    if best_state is not None:
+    if best_state is not None and load_best:
         model.load_state_dict(best_state)
     return model
 
@@ -354,12 +353,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ResidualBlockSE(nn.Module):
-    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0):
+    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0, dilation=1):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        padding=dilation
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=padding, dilation=dilation)
         self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        #self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=padding, dilation=dilation)
+        #self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.dropout = nn.Dropout2d(p=dropout_p) 
 
@@ -395,7 +395,7 @@ class ResidualBlockSE(nn.Module):
         identity = x
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.dropout(out)
-        out = self.bn2(self.conv2(out))
+        #out = self.bn2(self.conv2(out))
 
         # --- SE attention pooling ---
         if self.pool_type == "avg":
@@ -532,7 +532,7 @@ def pearson_loss(pred, target, eps=1e-8):
 class main_net(nn.Module):
     def __init__(self, in_channels=1, out_channels=3, base_channels=32,
                  use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
-                 use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='max', 
+                 use_cross_attention=True, attn_heads=1, epochs=epochs, pool_type='max', 
                  err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=1,
                  suffix='', dropout_1=0, dropout_2=0, dropout_3=0, predict_scalars=True, n_scalars=1):
         super().__init__()
@@ -568,11 +568,12 @@ class main_net(nn.Module):
         #self.use_fc_bottleneck = use_fc_bottleneck
         #self.use_cross_attention = use_cross_attention
 
+        d1, d2, d3, d4 = 2, 4, 8,16
         # Encoder
-        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1)
+        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1, dilation=d1)
+        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1, dilation=d2)
+        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1, dilation=d3)
+        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1, dilation=d4)
         self.pool = nn.MaxPool2d(2)
 
         # Optional FC bottleneck
@@ -586,9 +587,12 @@ class main_net(nn.Module):
         self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
 
         # Decoder with skip connections
-        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type, dropout_p=dropout_3)
-        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, pool_type=pool_type, dropout_p=dropout_3)
-        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type, dropout_p=dropout_3)
+        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, 
+                                    pool_type=pool_type, dropout_p=dropout_3, dilation=d4)
+        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, 
+                                    pool_type=pool_type, dropout_p=dropout_3, dilation = d3)
+        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, 
+                                    pool_type=pool_type, dropout_p=dropout_3, dilation = d2)
         self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
 
         # --- Multi-scale output heads ---

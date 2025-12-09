@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3105
-what = "3100 with shifter.  Pretty good."
+idd = 3107
+what = "3105 with reductions"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -31,9 +31,8 @@ fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
 fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
 fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
-fname_train = "p79d_subsets_S512_N3_xyz_T_odd.h5"
-fname_valid = "p79d_subsets_S512_N3_xyz_T_even.h5"
-pdb.set_trace()
+fname_train = "p79d_subsets_S512_N3_xyz_T_even.h5"
+fname_valid = "p79d_subsets_S512_N3_xyz_T_odd.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
@@ -52,14 +51,13 @@ lr = 1e-3
 batch_size=64
 lr_schedule=[100]
 weight_decay = 1e-3
-fc_bottleneck=True
+fc_bottleneck=False
 def load_data():
 
     print('read the data')
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
     valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
     all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'][:ntest], 'quantities':{}}
-    pdb.set_trace()
     all_data['quantities']['train']=train['quantities']['train']
     all_data['quantities']['valid']=valid['quantities']['valid']
     all_data['quantities']['test']=valid['quantities']['test']
@@ -68,7 +66,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
+    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -158,7 +156,7 @@ def trainer(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * max(1, len(train_loader))
-    print("Total Steps", total_steps, "ntrain", ntrain, "epoch", epochs, "down", downsample)
+    print("Total Steps", total_steps, "ntrain", ntrain, "epoch", epochs)
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
@@ -358,8 +356,8 @@ class ResidualBlockSE(nn.Module):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        #self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        #self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.dropout = nn.Dropout2d(p=dropout_p) 
 
@@ -395,31 +393,32 @@ class ResidualBlockSE(nn.Module):
         identity = x
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.dropout(out)
-        out = self.bn2(self.conv2(out))
+        #out = self.bn2(self.conv2(out))
 
         # --- SE attention pooling ---
-        if self.pool_type == "avg":
-            w = self.pool(out).view(out.size(0), -1)
-        elif self.pool_type == "max":
-            w = self.pool(out).view(out.size(0), -1)
-        elif self.pool_type == "avgmax":
-            w_avg = self.pool_avg(out).view(out.size(0), -1)
-            w_max = self.pool_max(out).view(out.size(0), -1)
-            w = torch.cat([w_avg, w_max], dim=1)
-        elif self.pool_type == "learned":
-            # Apply learned 1x1 conv → softmax over spatial dims
-            weights = F.softmax(self.pool(out).view(out.size(0), -1), dim=1)
-            w = torch.sum(out.view(out.size(0), out.size(1), -1) * weights.unsqueeze(1), dim=-1)
+        if 0:
+            if self.pool_type == "avg":
+                w = self.pool(out).view(out.size(0), -1)
+            elif self.pool_type == "max":
+                w = self.pool(out).view(out.size(0), -1)
+            elif self.pool_type == "avgmax":
+                w_avg = self.pool_avg(out).view(out.size(0), -1)
+                w_max = self.pool_max(out).view(out.size(0), -1)
+                w = torch.cat([w_avg, w_max], dim=1)
+            elif self.pool_type == "learned":
+                # Apply learned 1x1 conv → softmax over spatial dims
+                weights = F.softmax(self.pool(out).view(out.size(0), -1), dim=1)
+                w = torch.sum(out.view(out.size(0), out.size(1), -1) * weights.unsqueeze(1), dim=-1)
 
-        # --- SE excitation ---
-        w = F.relu(self.fc1(w))
-        w = torch.sigmoid(self.fc2(w)).view(out.size(0), out.size(1), 1, 1)
-        out = out * w
+            # --- SE excitation ---
+            w = F.relu(self.fc1(w))
+            w = torch.sigmoid(self.fc2(w)).view(out.size(0), out.size(1), 1, 1)
+            out = out * w
 
         # Skip connection
-        if self.proj is not None:
-            identity = self.proj(identity)
-        out += identity
+        #if self.proj is not None:
+        #    identity = self.proj(identity)
+        #out += identity
         return F.relu(out)
 
 

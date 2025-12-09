@@ -20,20 +20,14 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3105
-what = "3100 with shifter.  Pretty good."
+idd = 3103
+what = "3102 with rotation"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
-fname_train = "p79d_subsets_S512_N5_xyz__down_64T_first.h5"
-fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
+fname_train = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
+fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_first.h5"
 
-fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
-fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
-
-fname_train = "p79d_subsets_S512_N3_xyz_T_odd.h5"
-fname_valid = "p79d_subsets_S512_N3_xyz_T_even.h5"
-pdb.set_trace()
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
@@ -47,19 +41,19 @@ downsample = 64
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 20
 epochs = 50
-lr = 1e-3
-#lr = 1e-4
+#lr = 1e-3
+lr = 1e-4
+#lr = 1e-5
 batch_size=64
 lr_schedule=[100]
 weight_decay = 1e-3
-fc_bottleneck=True
+fc_bottleneck=False
 def load_data():
 
     print('read the data')
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
     valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
     all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'][:ntest], 'quantities':{}}
-    pdb.set_trace()
     all_data['quantities']['train']=train['quantities']['train']
     all_data['quantities']['valid']=valid['quantities']['valid']
     all_data['quantities']['test']=valid['quantities']['test']
@@ -68,7 +62,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
+    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1, rotation_prob=0.3)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -101,26 +95,34 @@ def downsample_avg(x, M):
 import torchvision.transforms.functional as TF
 import random
 class SphericalDataset(Dataset):
-    def __init__(self, all_data, quan, rotation_prob = 0.0, rand=False):
+    def __init__(self, all_data, quan, rotation_prob = 0.0):
         self.rotation_prob = rotation_prob
         self.quan=quan
         if downsample:
             self.all_data=downsample_avg(all_data,downsample)
         else:
             self.all_data=all_data
-        self.rand=rand
     def __len__(self):
         return self.all_data.size(0)
 
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
-        H, W = self.all_data[0][0].shape
-        dy = torch.randint(0, H, (1,)).item()
-        dx = torch.randint(0, W, (1,)).item()
-        theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
-        ms = self.quan['Ms_act'][idx]
+        theset = self.all_data[idx]
+        ms = np.log10(self.quan['Ms_act'][idx])
         ma = self.quan['Ma_act'][idx]
-        return theset[0].to(device), torch.tensor([ms], dtype=torch.float32).to(device)
+        x=theset[0].to(device)
+        if random.random() < self.rotation_prob:
+            # 0, 90, 180, 270 deg
+            k = random.randint(0, 3)
+            x = torch.rot90(x, k, dims=(-2, -1))
+
+            # maybe also random flips
+            if random.random() < 0.5:
+                x = torch.flip(x, dims=[-1])
+            if random.random() < 0.5:
+                x = torch.flip(x, dims=[-2])
+
+        return x, torch.tensor([ms], dtype=torch.float32).to(device)
 
 # ---------------------------
 # Utils
@@ -149,7 +151,7 @@ def trainer(
 ):
     set_seed()
 
-    ds_train = SphericalDataset(all_data['train'],all_data['quantities']['train'], rotation_prob=model.rotation_prob, rand=True)
+    ds_train = SphericalDataset(all_data['train'],all_data['quantities']['train'], rotation_prob=model.rotation_prob)
     ds_val   = SphericalDataset(all_data['valid'],all_data['quantities']['valid'], rotation_prob=model.rotation_prob)
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader   = DataLoader(ds_val,   batch_size=max(64, batch_size), shuffle=False, drop_last=False)
@@ -158,7 +160,7 @@ def trainer(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * max(1, len(train_loader))
-    print("Total Steps", total_steps, "ntrain", ntrain, "epoch", epochs, "down", downsample)
+    print("Total Steps", total_steps)
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
@@ -189,7 +191,7 @@ def trainer(
         import tqdm
         for xb, yb in tqdm.tqdm(train_loader):
             xb = xb.to(device)
-            #yb = yb.to(device)
+            yb = yb.to(device)
 
             optimizer.zero_grad(set_to_none=True)
             if verbose:
@@ -204,7 +206,10 @@ def trainer(
 
             if verbose:
                 print("  scale backward")
+
             loss.backward()
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
             if verbose:
                 print("  steps")
@@ -224,7 +229,7 @@ def trainer(
             vtotal = 0.0
             for xb, yb in val_loader:
                 xb = xb.to(device)
-                #yb = yb.to(device)
+                yb = yb.to(device)
                 preds = model(xb)
                 #vloss = model.criterion(preds, yb[:,0:1,:,:])
                 vloss = model.criterion(preds, yb)
@@ -358,8 +363,8 @@ class ResidualBlockSE(nn.Module):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        #self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        #self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.dropout = nn.Dropout2d(p=dropout_p) 
 
@@ -395,7 +400,8 @@ class ResidualBlockSE(nn.Module):
         identity = x
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.dropout(out)
-        out = self.bn2(self.conv2(out))
+        #out = self.bn2(self.conv2(out))
+
 
         # --- SE attention pooling ---
         if self.pool_type == "avg":
@@ -602,7 +608,7 @@ class main_net(nn.Module):
 
         if self.predict_scalars:
             in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
-            self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.Linear(in_dim, self.n_scalars))
+            self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.ReLU(),nn.Dropout(p=0.1), nn.Linear(in_dim, self.n_scalars))
 
 
         self.register_buffer("train_curve", torch.zeros(epochs))

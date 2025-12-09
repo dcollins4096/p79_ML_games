@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3105
-what = "3100 with shifter.  Pretty good."
+idd = 3106
+what = "3105 with random"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -31,9 +31,8 @@ fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
 fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
 fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
-fname_train = "p79d_subsets_S512_N3_xyz_T_odd.h5"
-fname_valid = "p79d_subsets_S512_N3_xyz_T_even.h5"
-pdb.set_trace()
+fname_train = "p79d_subsets_S512_N3_xyz_T_even.h5"
+fname_valid = "p79d_subsets_S512_N3_xyz_T_odd.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
@@ -59,7 +58,6 @@ def load_data():
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
     valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
     all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'][:ntest], 'quantities':{}}
-    pdb.set_trace()
     all_data['quantities']['train']=train['quantities']['train']
     all_data['quantities']['valid']=valid['quantities']['valid']
     all_data['quantities']['test']=valid['quantities']['test']
@@ -68,7 +66,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
+    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -120,6 +118,8 @@ class SphericalDataset(Dataset):
         theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
         ms = self.quan['Ms_act'][idx]
         ma = self.quan['Ma_act'][idx]
+        if self.rand:
+            theset = theset*(1+0.05*torch.randn_like(theset))
         return theset[0].to(device), torch.tensor([ms], dtype=torch.float32).to(device)
 
 # ---------------------------
@@ -158,7 +158,7 @@ def trainer(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * max(1, len(train_loader))
-    print("Total Steps", total_steps, "ntrain", ntrain, "epoch", epochs, "down", downsample)
+    print("Total Steps", total_steps, "ntrain", ntrain, "epoch", epochs)
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
