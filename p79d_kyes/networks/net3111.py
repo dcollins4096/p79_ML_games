@@ -21,7 +21,7 @@ import torch_power
 
 
 idd = 3111
-what = "3105 with dilation"
+what = "3110 with 512 datasets"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"

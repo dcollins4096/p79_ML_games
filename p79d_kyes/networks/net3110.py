@@ -31,8 +31,8 @@ fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
 fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
 fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
-fname_train = "p79d_subsets_S512_N3_xyz_T_odd.h5"
-fname_valid = "p79d_subsets_S512_N3_xyz_T_even.h5"
+#fname_train = "p79d_subsets_S512_N3_xyz_T_even.h5"
+#fname_valid = "p79d_subsets_S512_N3_xyz_T_odd.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20

@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3112
-what = "3110 with Athena suite"
+idd = 3114
+what = "3111 with 1&2"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -31,8 +31,8 @@ fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
 fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
 fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
-fname_train = "p79d_subsets_S512_N3_xyz_Athena_T_even.h5"
-fname_valid = "p79d_subsets_S512_N3_xyz_Athena_T_odd.h5"
+#fname_train = "p79d_subsets_S512_N3_xyz_T_odd.h5"
+#fname_valid = "p79d_subsets_S512_N3_xyz_T_even.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
@@ -41,14 +41,14 @@ ntrain = 10000
 #ntrain = 10
 nvalid=30
 ntest = 5000
-downsample = 64
+downsample = None
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-#epochs  = 1e6
-epochs = 50
+#epochs  = 20
+epochs = 500
 lr = 0.5e-3
 #lr = 1e-4
-batch_size=64
+batch_size=16
 lr_schedule=[1000]
 weight_decay = 1e-2
 fc_bottleneck=True
@@ -66,7 +66,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)#, dropout_1=0.3, dropout_2=0.3, dropout_3=0.3)
+    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 

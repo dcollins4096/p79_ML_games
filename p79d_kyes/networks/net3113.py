@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3112
-what = "3110 with Athena suite"
+idd = 3113  
+what = "3110 with noise"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -31,8 +31,8 @@ fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
 fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
 fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
-fname_train = "p79d_subsets_S512_N3_xyz_Athena_T_even.h5"
-fname_valid = "p79d_subsets_S512_N3_xyz_Athena_T_odd.h5"
+#fname_train = "p79d_subsets_S512_N3_xyz_T_even.h5"
+#fname_valid = "p79d_subsets_S512_N3_xyz_T_odd.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
@@ -45,7 +45,7 @@ downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 1e6
-epochs = 50
+epochs = 300
 lr = 0.5e-3
 #lr = 1e-4
 batch_size=64
@@ -116,6 +116,8 @@ class SphericalDataset(Dataset):
         dy = torch.randint(0, H, (1,)).item()
         dx = torch.randint(0, W, (1,)).item()
         theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
+        if self.rand:
+            theset = theset *(1+0.05*torch.randn_like(theset))
         ms = self.quan['Ms_act'][idx]
         ma = self.quan['Ma_act'][idx]
         return theset[0].to(device), torch.tensor([ms], dtype=torch.float32).to(device)

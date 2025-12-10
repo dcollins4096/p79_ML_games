@@ -21,7 +21,7 @@ import torch_power
 
 
 idd = 3200
-what = "3110 with flow head"
+what = "3110 with different features"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -607,8 +607,9 @@ class main_net(nn.Module):
             self.cross_attn = CrossAttention(out_channels, num_heads=attn_heads)
 
         if self.predict_scalars:
-            in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
-            self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.Linear(in_dim, self.n_scalars))
+            #in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
+            in_dim = base_channels * (1 + 2 + 4 + 8)
+            self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.ReLU(),nn.Linear(in_dim, self.n_scalars))
 
 
         self.register_buffer("train_curve", torch.zeros(epochs))
@@ -625,6 +626,16 @@ class main_net(nn.Module):
         e2 = self.enc2(self.pool(e1))
         e3 = self.enc3(self.pool(e2))
         e4 = self.enc4(self.pool(e3))
+
+        B = x.size(0)
+        p1 = F.adaptive_avg_pool2d(e1, 1).view(B, -1)
+        p2 = F.adaptive_avg_pool2d(e2, 1).view(B, -1)
+        p3 = F.adaptive_avg_pool2d(e3, 1).view(B, -1)
+        p4 = F.adaptive_avg_pool2d(e4, 1).view(B, -1)
+
+        feat = torch.cat([p1, p2, p3, p4], dim=1)   # [B, C1+C2+C3+C4]
+        scalar = self.fc_out(feat)
+        return scalar
 
         # Optional FC bottleneck
         if self.use_fc_bottleneck:

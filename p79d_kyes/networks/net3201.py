@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3112
-what = "3110 with Athena suite"
+idd = 3201
+what = "3200 games with the scalar head"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -31,8 +31,8 @@ fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
 fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
 fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
-fname_train = "p79d_subsets_S512_N3_xyz_Athena_T_even.h5"
-fname_valid = "p79d_subsets_S512_N3_xyz_Athena_T_odd.h5"
+#fname_train = "p79d_subsets_S512_N3_xyz_T_even.h5"
+#fname_valid = "p79d_subsets_S512_N3_xyz_T_odd.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
@@ -45,7 +45,7 @@ downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 1e6
-epochs = 50
+epochs = 300
 lr = 0.5e-3
 #lr = 1e-4
 batch_size=64
@@ -116,6 +116,8 @@ class SphericalDataset(Dataset):
         dy = torch.randint(0, H, (1,)).item()
         dx = torch.randint(0, W, (1,)).item()
         theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
+        if self.rand:
+            theset = theset *(1+0.05*torch.randn_like(theset))
         ms = self.quan['Ms_act'][idx]
         ma = self.quan['Ma_act'][idx]
         return theset[0].to(device), torch.tensor([ms], dtype=torch.float32).to(device)
@@ -605,8 +607,9 @@ class main_net(nn.Module):
             self.cross_attn = CrossAttention(out_channels, num_heads=attn_heads)
 
         if self.predict_scalars:
-            in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
-            self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.Linear(in_dim, self.n_scalars))
+            #in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
+            in_dim = base_channels * (1 + 2 + 4)# + 8)
+            self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.ReLU(),nn.Linear(in_dim, self.n_scalars))
 
 
         self.register_buffer("train_curve", torch.zeros(epochs))
@@ -623,6 +626,16 @@ class main_net(nn.Module):
         e2 = self.enc2(self.pool(e1))
         e3 = self.enc3(self.pool(e2))
         e4 = self.enc4(self.pool(e3))
+
+        B = x.size(0)
+        p1 = F.adaptive_avg_pool2d(e1, 1).view(B, -1)
+        p2 = F.adaptive_avg_pool2d(e2, 1).view(B, -1)
+        p3 = F.adaptive_avg_pool2d(e3, 1).view(B, -1)
+        p4 = F.adaptive_avg_pool2d(e4, 1).view(B, -1)
+
+        #feat = torch.cat([p1, p2, p3, p4], dim=1)   # [B, C1+C2+C3+C4]
+        #scalar = self.fc_out(feat)
+        #return scalar
 
         # Optional FC bottleneck
         if self.use_fc_bottleneck:
@@ -642,9 +655,9 @@ class main_net(nn.Module):
             B, C, H, W = e4.shape
             feat = F.adaptive_avg_pool2d(e4, 1).view(B, -1)
 
-        if self.predict_scalars:
-            # Return [B, n_scalars] instead of images
-            return self.fc_out(feat)
+        #if self.predict_scalars:
+        #    # Return [B, n_scalars] instead of images
+        #    return self.fc_out(feat)
 
         # Decoder
         d4 = self.up4(e4)
@@ -665,6 +678,18 @@ class main_net(nn.Module):
         out_d4 = self.out_d4(d4)
         out_d3 = self.out_d3(d3)
         out_d2 = self.out_d2(d2)
+        p4 = F.adaptive_avg_pool2d(d4, 1).view(B, -1)  # [B, 4*base]
+        p3 = F.adaptive_avg_pool2d(d3, 1).view(B, -1)  # [B, 2*base]
+        p2 = F.adaptive_avg_pool2d(d2, 1).view(B, -1)  # [B, 1*base]
+
+        feat = torch.cat([p4, p3, p2], dim=1)          # [B, (4+2+1)*base]
+
+        scalars = self.fc_out(feat)                    # [B, n_scalars]
+        return scalars
+
+        scalar_feat = F.adaptive_avg_pool2d(out_d2)
+        scalar = self.fc_out(scalar_feat)
+        return scalar
 
         if self.use_cross_attention:
             out_main = self.cross_attn(out_main)
