@@ -372,7 +372,6 @@ class main_net(nn.Module):
                  use_cross_attention=True, attn_heads=1, epochs=epochs, pool_type='max', 
                  suffix='', dropout_1=0, dropout_2=0, dropout_3=0, predict_scalars=True, n_scalars=1):
         super().__init__()
-        arg_dict = locals()
         self.use_fc_bottleneck = use_fc_bottleneck
         self.fc_spatial = fc_spatial
         self.dropout_2=dropout_2
@@ -410,27 +409,6 @@ class main_net(nn.Module):
             self.fc2 = nn.Linear(fc_hidden, base_channels*8*fc_spatial*fc_spatial)
 
         # Learned upsampling via ConvTranspose2d
-        self.up4 = nn.ConvTranspose2d(base_channels*8, base_channels*8, kernel_size=3, stride=2, padding=1, output_padding=1)
-        self.up3 = nn.ConvTranspose2d(base_channels*4, base_channels*4, kernel_size=3, stride=2, padding=1, output_padding=1)
-        self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
-
-        # Decoder with skip connections
-        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, 
-                                    pool_type=pool_type, dropout_p=dropout_3, dilation=d4)
-        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, 
-                                    pool_type=pool_type, dropout_p=dropout_3, dilation = d3)
-        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, 
-                                    pool_type=pool_type, dropout_p=dropout_3, dilation = d2)
-        self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
-
-        # --- Multi-scale output heads ---
-        self.out_d4 = nn.Conv2d(base_channels*4, out_channels, 3, padding=1)
-        self.out_d3 = nn.Conv2d(base_channels*2, out_channels, 3, padding=1)
-        self.out_d2 = nn.Conv2d(base_channels,   out_channels, 3, padding=1)
-
-        # Optional cross-attention
-        if use_cross_attention:
-            self.cross_attn = CrossAttention(out_channels, num_heads=attn_heads)
 
         if self.predict_scalars:
             in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
