@@ -39,7 +39,7 @@ fname_valid = "p79d_subsets_S128_N1_xyz_suite7vs_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 1400
+ntrain = 14000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -48,7 +48,7 @@ downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 1e6
-epochs = 50
+epochs = 30
 lr = 0.5e-3
 #lr = 1e-4
 batch_size=64
