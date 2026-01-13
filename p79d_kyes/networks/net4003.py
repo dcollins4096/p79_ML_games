@@ -278,76 +278,6 @@ def trainer(
 
     # quick plot (optional)
 
-def plot_loss_curve(model):
-    plt.clf()
-    plt.plot(model.train_curve.cpu(), label="train")
-    plt.plot(model.val_curve.cpu(),   label="val")
-    plt.yscale("log")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig("%s/plots/errtime_net%04d"%(os.environ['HOME'], model.idd))
-
-def power_spectrum_delta(guess,target):
-    T_guess = torch_power.powerspectrum(guess)
-    T_target = torch_power.powerspectrum(target)
-    output = torch.mean( torch.abs(torch.log(T_guess.avgpower/(T_target.avgpower+1e-8))))
-    return output
-
-def power_spectra_crit(guess,target):
-    err_T = power_spectrum_delta(guess[:,0:1,:,:], target[:,0:1,:,:])
-    err_E = power_spectrum_delta(guess[:,1:2,:,:], target[:,1:2,:,:])
-    err_B = power_spectrum_delta(guess[:,2:3,:,:], target[:,2:3,:,:])
-    return err_T+err_E+err_B
-
-def cross_spectrum_delta(guess,target):
-    T_guess = torch_power.crossspectrum(guess, target)
-    T_target = torch_power.powerspectrum(target)
-    num = torch.clamp(torch.abs(T_guess.avgpower), min=1e-12)
-    den = torch.clamp(T_target.avgpower, min=1e-12)
-    output = torch.mean(torch.abs(torch.log(num / den)))
-    if (T_guess.avgpower < 0).any():
-            negative = torch.mean(torch.abs(T_guess.avgpower[T_guess.avgpower < 0]))
-    else:
-            negative = 0.0
-    return output+negative
-
-def cross_spectrum_cosine(guess, target):
-    G = torch.fft.fftn(guess, dim=(-2, -1))
-    T = torch.fft.fftn(target, dim=(-2, -1))
-    num = torch.sum(G * torch.conj(T)).real
-    denom = torch.sqrt(torch.sum(torch.abs(G)**2) * torch.sum(torch.abs(T)**2))
-    return 1 - num / (denom + 1e-12)
-
-def cross_spectra_crit(guess,target):
-    err_T = cross_spectrum_cosine(guess[:,0:1,:,:], target[:,0:1,:,:])
-    err_E = cross_spectrum_cosine(guess[:,1:2,:,:], target[:,1:2,:,:])
-    err_B = cross_spectrum_cosine(guess[:,2:3,:,:], target[:,2:3,:,:])
-    return err_T+err_E+err_B
-
-import bispectrum
-def bispectrum_crit(guess,target):
-    nsamples=100
-    T_guess = bispectrum.compute_bispectrum_torch(guess[:,0:1,:,:]  ,nsamples=nsamples)[0]
-    E_guess = bispectrum.compute_bispectrum_torch(guess[:,1:2,:,:]  ,nsamples=nsamples)[0]
-    B_guess = bispectrum.compute_bispectrum_torch(guess[:,2:3,:,:]  ,nsamples=nsamples)[0]
-    T_target = bispectrum.compute_bispectrum_torch(target[:,0:1,:,:],nsamples=nsamples)[0]
-    E_target = bispectrum.compute_bispectrum_torch(target[:,1:2,:,:],nsamples=nsamples)[0]
-    B_target = bispectrum.compute_bispectrum_torch(target[:,2:3,:,:],nsamples=nsamples)[0]
-    dT = torch.mean(torch.abs(torch.log(torch.abs( T_guess / T_target))))
-    dE = torch.mean(torch.abs(torch.log(torch.abs( E_guess / E_target))))
-    dB = torch.mean(torch.abs(torch.log(torch.abs( B_guess / B_target))))
-    #pdb.set_trace()
-    return dT+dE+dB
-
-def error_real_imag(guess,target):
-
-    L1  = F.l1_loss(guess.real, target.real)
-    L1 += F.l1_loss(guess.imag, target.imag)
-    return L1
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 class ResidualBlockSE(nn.Module):
     def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0, dilation=1):
@@ -420,40 +350,6 @@ class ResidualBlockSE(nn.Module):
         return F.relu(out)
 
 
-def ssim_loss(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
-    """
-    Compute SSIM loss: 1 - SSIM (so that lower is better).
-    pred, target: [B, C, H, W]
-    """
-    # Gaussian kernel for local statistics
-    def gaussian_window(window_size, sigma=1.5):
-        coords = torch.arange(window_size, dtype=torch.float)
-        coords -= window_size // 2
-        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
-        g /= g.sum()
-        return g
-
-    device = pred.device
-    channel = pred.size(1)
-    window = gaussian_window(window_size).to(device)
-    window_2d = (window[:, None] * window[None, :]).unsqueeze(0).unsqueeze(0)
-    window_2d = window_2d.repeat(channel, 1, 1, 1)
-
-    mu_pred = F.conv2d(pred, window_2d, padding=window_size//2, groups=channel)
-    mu_target = F.conv2d(target, window_2d, padding=window_size//2, groups=channel)
-
-    mu_pred_sq = mu_pred.pow(2)
-    mu_target_sq = mu_target.pow(2)
-    mu_pred_target = mu_pred * mu_target
-
-    sigma_pred_sq = F.conv2d(pred * pred, window_2d, padding=window_size//2, groups=channel) - mu_pred_sq
-    sigma_target_sq = F.conv2d(target * target, window_2d, padding=window_size//2, groups=channel) - mu_target_sq
-    sigma_pred_target = F.conv2d(pred * target, window_2d, padding=window_size//2, groups=channel) - mu_pred_target
-
-    ssim_map = ((2 * mu_pred_target + C1) * (2 * sigma_pred_target + C2)) / \
-               ((mu_pred_sq + mu_target_sq + C1) * (sigma_pred_sq + sigma_target_sq + C2))
-
-    return 1 - ssim_map.mean()  # SSIM loss
 
 class CrossAttention(nn.Module):
     def __init__(self, channels, num_heads=4):
@@ -469,62 +365,6 @@ class CrossAttention(nn.Module):
         x_attn, _ = self.attn(x_flat, x_flat, x_flat) # self-attention
         return x_attn.transpose(1, 2).view(B, C, H, W)
 
-
-def gradient_loss(pred, target):
-    """
-    Computes a gradient (edge-aware) loss between pred and target.
-    Both tensors should be [B, C, H, W].
-    Returns a scalar loss.
-    """
-    # Compute gradients in x and y direction
-    pred_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
-    pred_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
-    target_dx = target[:, :, :, 1:] - target[:, :, :, :-1]
-    target_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
-
-    loss_x = F.l1_loss(pred_dx, target_dx)
-    loss_y = F.l1_loss(pred_dy, target_dy)
-
-    return loss_x + loss_y
-
-def my_pearsonr(x, y, eps=1e-8):
-    """
-    Compute Pearson correlation coefficient between two tensors x and y.
-    x and y must have the same shape.
-    """
-    x_mean = x.mean()
-    y_mean = y.mean()
-
-    xm = x - x_mean
-    ym = y - y_mean
-
-    r_num = torch.sum(xm * ym)
-    r_den = torch.sqrt(torch.sum(xm ** 2) * torch.sum(ym ** 2) + eps)
-
-    return r_num / r_den
-
-   
-import torch
-import torch.nn.functional as F
-
-def pearson_loss(pred, target, eps=1e-8):
-    """
-    pred, target: [B, 1, H, W]
-    Computes 1 - Pearson correlation (mean over batch)
-    """
-    B = pred.shape[0]
-    pred = pred.reshape(B, -1)
-    target = target.reshape(B, -1)
-
-    # zero-mean + variance normalize
-    pred = pred - pred.mean(dim=1, keepdim=True)
-    target = target - target.mean(dim=1, keepdim=True)
-
-    pred = pred / (pred.norm(dim=1, keepdim=True) + eps)
-    target = target / (target.norm(dim=1, keepdim=True) + eps)
-
-    r = F.cosine_similarity(pred, target, dim=1)  # [B]
-    return 1 - r.mean()
 
 class main_net(nn.Module):
     def __init__(self, in_channels=3, out_channels=3, base_channels=32,
