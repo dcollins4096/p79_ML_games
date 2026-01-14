@@ -169,7 +169,7 @@ def trainer(
 
     best_val = float("inf")
     best_state = None
-    load_best = False
+    load_best = True
     patience = 1e6
     bad_epochs = 0
 
@@ -446,22 +446,18 @@ class RadialProfile(nn.Module):
 
 # ---------------------------------------------------------
 # 2. Updated Main Net
-# ---------------------------------------------------------
 class main_net(nn.Module):
     def __init__(self, in_channels=1, out_channels=3, base_channels=32,
                  use_fc_bottleneck=True, fc_hidden=2048, fc_spatial=4, rotation_prob=0,
                  use_cross_attention=False, attn_heads=1, epochs=100, pool_type='max', 
                  suffix='', dropout_1=0.0, dropout_2=0.0, dropout_3=0.0, 
-                 predict_scalars=True, n_scalars=1, img_size=64): # <--- Added img_size arg
+                 predict_scalars=True, n_scalars=1, img_size=64):
         super().__init__()
         
         self.predict_log=True
         self.use_fc_bottleneck = use_fc_bottleneck
         self.fc_spatial = fc_spatial
-        self.dropout_2 = dropout_2
-        self.predict_scalars = predict_scalars
-        self.n_scalars = n_scalars
-
+        
         # --- Spatial Encoder (CNN) ---
         d1, d2, d3, d4 = 2, 4, 8, 16
         self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1, dilation=d1)
@@ -470,44 +466,55 @@ class main_net(nn.Module):
         self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1, dilation=d4)
         self.pool = nn.MaxPool2d(2)
 
+        # Calculate CNN output size
+        # base=32 -> enc4=256 channels.
+        # adaptive_pool to (fc_spatial, fc_spatial) -> 256 * 4 * 4
+        cnn_raw_dim = base_channels * 8 * fc_spatial * fc_spatial 
+        
+        # FIX 1: CNN Bottleneck
+        # Compress huge spatial vector down to 128 BEFORE fusion
+        self.cnn_bottleneck = nn.Sequential(
+            nn.Linear(cnn_raw_dim, 128),
+            nn.LayerNorm(128),  # LayerNorm is often better for regression stability
+            nn.GELU()
+        )
+
         # --- Spectral Encoder (PSD) ---
-        # Assuming img_size is the input dimension (e.g., 64 or 128)
         self.psd_calculator = RadialProfile(img_size)
         psd_input_dim = self.psd_calculator.n_bins - 1
         
+        # FIX 2: Better PSD Processing
         self.psd_mlp = nn.Sequential(
+            nn.LayerNorm(psd_input_dim), # Normalize each sample independently
             nn.Linear(psd_input_dim, 128),
             nn.GELU(),
-            nn.Linear(128, 64),
+            nn.Linear(128, 128), # Project to same size as CNN features
+            nn.LayerNorm(128),
             nn.GELU()
         )
 
         # --- Fusion & Regression ---
-        # CNN output dim
-        cnn_feature_dim = base_channels * 8 * fc_spatial * fc_spatial
-        
-        # Combined dim = CNN features + PSD features (64)
-        total_in_dim = cnn_feature_dim + 64
+        # Now we fuse 128 (CNN) + 128 (PSD) = 256
+        total_in_dim = 256 
 
         self.regressor = nn.Sequential(
-            nn.Flatten(),
             nn.Linear(total_in_dim, fc_hidden),
             nn.GELU(),
             nn.Dropout(p=dropout_2),
             nn.Linear(fc_hidden, fc_hidden // 2),
             nn.GELU(),
-            nn.Linear(fc_hidden // 2, self.n_scalars)
+            nn.Linear(fc_hidden // 2, n_scalars)
         )
+        
+        # Learnable gate (initialized to small value to start with primarily CNN)
+        self.psd_weight = nn.Parameter(torch.tensor(0.1))
 
         self.register_buffer("train_curve", torch.zeros(epochs))
         self.register_buffer("val_curve", torch.zeros(epochs))
 
     def forward(self, x):
-        # 1. Log-transform input for CNN
-        # (We keep a raw copy for FFT if you prefer, but usually FFT of log-density 
-        # is better for Mach number anyway)
+        # 1. Input Prep
         x_log = torch.log1p(x)
-
         if x_log.ndim == 3:
             x_log = x_log.unsqueeze(1)
             x = x.unsqueeze(1)
@@ -518,27 +525,35 @@ class main_net(nn.Module):
         e3 = self.enc3(self.pool(e2))
         e4 = self.enc4(self.pool(e3))
         
-        # Global Pool / Flatten
         z_spatial = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial))
         z_spatial = z_spatial.view(z_spatial.size(0), -1)
+        
+        # Compress CNN features
+        z_spatial = self.cnn_bottleneck(z_spatial)
 
         # --- Path B: Spectral PSD ---
-        # We pass the log-density to the PSD calculator as well
-        # (The slope of log-density is the standard metric in the field)
-        #psd_raw = self.psd_calculator(x) 
-        psd_raw = self.psd_calculator(x_log)
+        # Note: Use x_log for consistency with CNN input
+        psd_raw = self.psd_calculator(x_log) 
+        
+        # Important: psd_mlp expects [B, Channels, Length] for InstanceNorm1d
+        # but Linear layers expect [B, Length]. 
+        # So we unsqueeze for Norm, then squeeze back.
+        #z_spectral = self.psd_mlp[0](psd_raw.unsqueeze(1)).squeeze(1) 
         z_spectral = self.psd_mlp(psd_raw)
+        # Pass through rest of MLP
+        for layer in self.psd_mlp[1:]:
+            z_spectral = layer(z_spectral)
 
-        # --- Path C: Fusion ---
-        z_combined = torch.cat([z_spatial, z_spectral], dim=1)
+        # --- Path C: Weighted Fusion ---
+        # We allow the network to scale the spectral features
+        z_combined = torch.cat([z_spatial, z_spectral * self.psd_weight], dim=1)
         
-        # Output
         out = self.regressor(z_combined)
-        
         return out
 
     def criterion1(self, preds, target):
         target = torch.clamp(target, min=1e-6)
+        # Assuming model predicts log(M), and target is raw M
         return {'mse': F.mse_loss(preds, target)}
 
     def criterion(self, preds, target):
