@@ -1,0 +1,1110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vision Transformer Deep Dive</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+        
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .section {
+            margin-bottom: 50px;
+        }
+        
+        .section h2 {
+            color: #667eea;
+            font-size: 2em;
+            margin-bottom: 20px;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+        }
+        
+        .section h3 {
+            color: #764ba2;
+            font-size: 1.5em;
+            margin-top: 30px;
+            margin-bottom: 15px;
+        }
+        
+        .concept-box {
+            background: #f8f9ff;
+            border-left: 5px solid #667eea;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 5px;
+        }
+        
+        .key-insight {
+            background: #fff3cd;
+            border-left: 5px solid #ffc107;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+        }
+        
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .comparison-card {
+            background: #f8f9ff;
+            padding: 20px;
+            border-radius: 10px;
+            border: 2px solid #667eea;
+        }
+        
+        .comparison-card h4 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        
+        canvas {
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            margin: 20px 0;
+            display: block;
+            max-width: 100%;
+            background: white;
+        }
+        
+        .interactive-demo {
+            background: #e8eaf6;
+            padding: 30px;
+            border-radius: 10px;
+            margin: 30px 0;
+        }
+        
+        .button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            margin: 5px;
+            transition: all 0.3s;
+        }
+        
+        .button:hover {
+            background: #764ba2;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+        
+        .code-block {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 20px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            line-height: 1.5;
+        }
+        
+        .math-block {
+            background: #fff;
+            border: 2px solid #667eea;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            font-family: 'Times New Roman', serif;
+            text-align: center;
+            font-size: 1.1em;
+        }
+        
+        .architecture-flow {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            margin: 30px 0;
+        }
+        
+        .flow-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px 40px;
+            border-radius: 10px;
+            font-weight: bold;
+            font-size: 1.1em;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            min-width: 300px;
+            text-align: center;
+        }
+        
+        .arrow {
+            font-size: 2em;
+            color: #667eea;
+        }
+        
+        ul, ol {
+            margin-left: 30px;
+            margin-top: 10px;
+        }
+        
+        li {
+            margin-bottom: 8px;
+        }
+        
+        strong {
+            color: #667eea;
+        }
+        
+        .highlight {
+            background: #fff3cd;
+            padding: 2px 6px;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Vision Transformer Deep Dive</h1>
+            <p>Understanding Transformers from First Principles</p>
+        </header>
+        
+        <div class="content">
+            <!-- Introduction -->
+            <div class="section">
+                <h2>Introduction: Why Transformers?</h2>
+                
+                <div class="comparison-grid">
+                    <div class="comparison-card">
+                        <h4>CNNs (Your Current Model)</h4>
+                        <ul>
+                            <li><strong>Local operations:</strong> Each conv filter sees only a small neighborhood (3×3, 5×5)</li>
+                            <li><strong>Hierarchical:</strong> Build features layer by layer</li>
+                            <li><strong>Inductive bias:</strong> Assumes nearby pixels are related</li>
+                            <li><strong>Limited receptive field:</strong> Need many layers to see the whole image</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="comparison-card">
+                        <h4>Vision Transformers</h4>
+                        <ul>
+                            <li><strong>Global operations:</strong> Every patch can "talk" to every other patch</li>
+                            <li><strong>Parallel processing:</strong> All relationships computed at once</li>
+                            <li><strong>Less bias:</strong> Learns what's important from data</li>
+                            <li><strong>Full receptive field:</strong> See entire image from layer 1</li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <div class="key-insight">
+                    <strong>Key Insight:</strong> CNNs use <em>convolution</em> to understand "what's near me?". Transformers use <em>attention</em> to ask "what's relevant to me, anywhere in the image?"
+                </div>
+            </div>
+
+            <!-- Core Concept 1: Self-Attention -->
+            <div class="section">
+                <h2> Core Concept 1: Self-Attention</h2>
+                
+                <p>Self-attention is the heart of transformers. It's a mechanism that lets each element in a sequence "look at" all other elements and decide which ones are important.</p>
+                
+                <div class="concept-box">
+                    <h3>The Attention Analogy</h3>
+                    <p>Imagine you're at a party (your image). You're having conversations (processing):</p>
+                    <ul>
+                        <li><strong>Query (Q):</strong> "What am I looking for?" (your interest)</li>
+                        <li><strong>Key (K):</strong> "What do others offer?" (their topics)</li>
+                        <li><strong>Value (V):</strong> "What's their actual content?" (their stories)</li>
+                    </ul>
+                    <p>You compute attention by matching your Query with everyone's Keys, then listening to their Values based on compatibility.</p>
+                </div>
+
+                <h3>The Mathematics</h3>
+                <div class="math-block">
+                    <p><strong>Attention(Q, K, V) = softmax(QK<sup>T</sup> / √d<sub>k</sub>) V</strong></p>
+                </div>
+
+                <div class="interactive-demo">
+                    <h3>Interactive: See Attention in Action</h3>
+                    <p>Click patches to see what they attend to:</p>
+                    <canvas id="attentionCanvas" width="600" height="600"></canvas>
+                    <div style="text-align: center; margin-top: 10px;">
+                        <button class="button" onclick="randomizeAttention()">Random Attention Pattern</button>
+                        <button class="button" onclick="localAttention()">Local Pattern</button>
+                        <button class="button" onclick="globalAttention()">Global Pattern</button>
+                    </div>
+                </div>
+
+                <h3>Breaking Down the Formula</h3>
+                <ol>
+                    <li><strong>QK<sup>T</sup>:</strong> Dot product measures similarity between query and all keys
+                        <div class="code-block">
+                            <pre>
+# Shape: [batch, num_heads, seq_len, seq_len]
+scores = torch.matmul(Q, K.transpose(-2, -1))
+# Each position gets a score for every other position
+                            </pre>
+                        </div>
+                    </li>
+                    
+                    <li><strong>/ √d<sub>k</sub>:</strong> Scale to prevent very large values (gradient issues)
+                        <div class="code-block">
+                        <pre>
+scores = scores / math.sqrt(self.head_dim)
+# If d_k=64, divide by 8 to keep values reasonable
+                        </pre>
+                        </div>
+                    </li>
+                    
+                    <li><strong>softmax(...):</strong> Convert scores to probabilities (sum to 1)
+                        <div class="code-block">
+                            <pre>
+attn_weights = F.softmax(scores, dim=-1)
+# Now each row is a probability distribution
+# High probability = "pay attention to this position"
+                            </pre>
+                        </div>
+                    </li>
+                    
+                    <li><strong>(...) V:</strong> Weighted sum of values using attention weights
+                        <div class="code-block">
+                            <pre>
+output = torch.matmul(attn_weights, V)
+# Mix values based on attention weights
+                            </pre>
+                        </div>
+                    </li>
+                </ol>
+            </div>
+
+            <!-- Core Concept 2: Multi-Head Attention -->
+            <div class="section">
+                <h2>Core Concept 2: Multi-Head Attention</h2>
+                
+                <div class="concept-box">
+                    <p><strong>Why multiple heads?</strong> Different heads can learn different types of relationships:</p>
+                    <ul>
+                        <li>Head 1: "Which patches have similar density?"</li>
+                        <li>Head 2: "Which patches form turbulent structures?"</li>
+                        <li>Head 3: "Which patches are spatially nearby?"</li>
+                        <li>Head 4: "Which patches have correlated velocity?"</li>
+                    </ul>
+                </div>
+
+                <canvas id="multiHeadCanvas" width="800" height="300"></canvas>
+
+                <h3>Implementation Details</h3>
+                <div class="code-block">
+                    <pre>
+# In your model: embed_dim=384, num_heads=6
+# Each head works with: head_dim = 384 / 6 = 64
+
+self.head_dim = dim // num_heads  # 64
+self.num_heads = num_heads        # 6
+
+# Create Q, K, V for ALL heads at once
+self.qkv = nn.Linear(dim, dim * 3)  # 384 -> 1152
+
+# Reshape to separate heads
+# [B, N, 384] -> [B, N, 3, 6, 64] -> [3, B, 6, N, 64]
+qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
+qkv = qkv.permute(2, 0, 3, 1, 4)
+q, k, v = qkv[0], qkv[1], qkv[2]  # Each is [B, 6, N, 64]
+
+# Compute attention for each head independently
+attn = (q @ k.transpose(-2, -1)) * self.scale  # [B, 6, N, N]
+attn = attn.softmax(dim=-1)
+x = (attn @ v)  # [B, 6, N, 64]
+
+# Concatenate heads back together
+x = x.transpose(1, 2).reshape(B, N, C)  # [B, N, 384]
+                    </pre>
+                </div>
+            </div>
+
+            <!-- Vision-Specific Concepts -->
+            <div class="section">
+                <h2> Vision-Specific Adaptations</h2>
+                
+                <h3>1. Patch Embedding</h3>
+                <div class="concept-box">
+                    <p>Transformers work on <strong>sequences</strong>, but images are 2D grids. Solution: Split image into patches!</p>
+                </div>
+
+                <canvas id="patchCanvas" width="800" height="400"></canvas>
+
+                <div class="code-block">
+                    <pre>
+# Your 128x128 image with 3 channels
+# Patch size = 16 → 8x8 = 64 patches
+
+class PatchEmbed(nn.Module):
+    def __init__(self, img_size=128, patch_size=16, in_chans=3, embed_dim=384):
+        super().__init__()
+        # Use Conv2d with stride=patch_size to extract patches
+        self.proj = nn.Conv2d(in_chans, embed_dim, 
+                             kernel_size=patch_size, 
+                             stride=patch_size)
+    
+    def forward(self, x):
+        # x: [B, 3, 128, 128]
+        x = self.proj(x)        # [B, 384, 8, 8]
+        x = x.flatten(2)        # [B, 384, 64]
+        x = x.transpose(1, 2)   # [B, 64, 384]
+        # Now we have 64 patches, each with 384 features!
+        return x
+                        </pre>
+                </div>
+
+                <h3>2. Position Embeddings</h3>
+                <div class="concept-box">
+                    <p><strong>Problem:</strong> Attention is <em>permutation invariant</em> - it doesn't know patch order!</p>
+                    <p><strong>Solution:</strong> Add learnable position embeddings to tell patches where they are.</p>
+                </div>
+
+                <div class="code-block">
+                    <pre>
+# Create learnable position embeddings
+self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+# Shape: [1, 65, 384] (64 patches + 1 class token)
+
+# In forward pass:
+x = self.patch_embed(img)        # [B, 64, 384]
+x = torch.cat([cls_token, x], 1) # [B, 65, 384]
+x = x + self.pos_embed           # Add position info
+# Now each patch "knows" its position!
+                    </pre>
+                </div>
+
+                <h3>3. Class Token</h3>
+                <div class="concept-box">
+                    <p>A special learnable token that aggregates information from all patches through attention. Used for final prediction.</p>
+                </div>
+
+                <div class="code-block">
+                    <pre>
+# Create learnable class token
+self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
+# Prepend to sequence
+cls_tokens = self.cls_token.expand(B, -1, -1)  # [B, 1, 384]
+x = torch.cat([cls_tokens, x], dim=1)           # [B, 65, 384]
+
+# After all transformer blocks:
+x = x[:, 0]  # Take only class token [B, 384]
+output = self.head(x)  # Predict Mach number [B, 1]
+                    </pre>
+                </div>
+            </div>
+
+            <!-- Complete Architecture Flow -->
+            <div class="section">
+                <h2> Complete Architecture Flow</h2>
+                
+                <div class="architecture-flow">
+                    <div class="flow-box">Input Image [B, 3, 128, 128]</div>
+                    <div class="arrow">↓</div>
+                    <div class="flow-box">Patch Embedding → [B, 64, 384]</div>
+                    <div class="arrow">↓</div>
+                    <div class="flow-box">Add Class Token → [B, 65, 384]</div>
+                    <div class="arrow">↓</div>
+                    <div class="flow-box">Add Position Embeddings → [B, 65, 384]</div>
+                    <div class="arrow">↓</div>
+                    <div class="flow-box">
+                        Transformer Block 1<br>
+                        <small>(LayerNorm → Attention → LayerNorm → MLP)</small>
+                    </div>
+                    <div class="arrow">↓</div>
+                    <div class="flow-box">... 6 Transformer Blocks Total ...</div>
+                    <div class="arrow">↓</div>
+                    <div class="flow-box">Final LayerNorm → [B, 65, 384]</div>
+                    <div class="arrow">↓</div>
+                    <div class="flow-box">Extract Class Token → [B, 384]</div>
+                    <div class="arrow">↓</div>
+                    <div class="flow-box">Linear Head → [B, 1]</div>
+                    <div class="arrow">↓</div>
+                    <div class="flow-box" style="background: linear-gradient(135deg, #28a745 0%, #20c997 100%);">
+                        Mach Number Prediction!
+                    </div>
+                </div>
+            </div>
+
+            <!-- Transformer Block Details -->
+            <div class="section">
+                <h2> Inside a Transformer Block</h2>
+                
+                <canvas id="blockCanvas" width="700" height="600"></canvas>
+
+                <div class="code-block">
+                    <pre>
+class TransformerBlock(nn.Module):
+    def forward(self, x):
+        # PRE-NORM ARCHITECTURE (modern approach)
+        
+        # 1. Normalize BEFORE attention
+        x_norm = self.norm1(x)
+        
+        # 2. Multi-head self-attention
+        attn_out = self.attn(x_norm)
+        
+        # 3. Residual connection (skip connection)
+        x = x + attn_out
+        
+        # 4. Normalize BEFORE MLP
+        x_norm = self.norm2(x)
+        
+        # 5. MLP (2 linear layers with GELU)
+        mlp_out = self.mlp(x_norm)
+        
+        # 6. Another residual connection
+        x = x + mlp_out
+        
+        return x
+                    </pre>
+                </div>
+
+                <div class="key-insight">
+                    <strong>Why residual connections?</strong> Allow gradients to flow directly through the network, enabling training of very deep models (your model has 6 blocks, but some go to 24+!)
+                </div>
+
+                <h3>The MLP Component</h3>
+                <div class="code-block">
+                    <pre>
+class MLP(nn.Module):
+    def __init__(self, in_features, hidden_features):
+        super().__init__()
+        # Expand dimension (384 -> 1536 with mlp_ratio=4)
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = nn.GELU()  # Smooth activation function
+        self.fc2 = nn.Linear(hidden_features, in_features)
+        self.drop = nn.Dropout(dropout)
+    
+    def forward(self, x):
+        x = self.fc1(x)      # [B, 65, 384] -> [B, 65, 1536]
+        x = self.act(x)      # Non-linearity
+        x = self.drop(x)     # Regularization
+        x = self.fc2(x)      # [B, 65, 1536] -> [B, 65, 384]
+        x = self.drop(x)
+        return x
+                    </pre>
+                </div>
+
+                <div class="concept-box">
+                    <p><strong>Purpose of MLP:</strong> After attention mixes information <em>between</em> patches, the MLP processes information <em>within</em> each patch independently. It's like attention handles "what to look at" and MLP handles "what to do with it".</p>
+                </div>
+            </div>
+
+            <!-- Key Differences -->
+            <div class="section">
+                <h2> ViT vs CNN: Key Differences for Your Use Case</h2>
+                
+                <div class="comparison-grid">
+                    <div class="comparison-card">
+                        <h4>Your CNN Model</h4>
+                        <ul>
+                            <li><strong>Receptive field grows slowly:</strong> 3x3 conv → 5x5 → 9x9...</li>
+                            <li><strong>Spatial hierarchy:</strong> Low-level (edges) → high-level (structures)</li>
+                            <li><strong>Translation invariant:</strong> Same features anywhere</li>
+                            <li><strong>Data efficient:</strong> Works with 14k samples</li>
+                            <li><strong>Good for:</strong> Local patterns, textures, gradients</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="comparison-card">
+                        <h4>Vision Transformer</h4>
+                        <ul>
+                            <li><strong>Global from start:</strong> Every patch sees all others immediately</li>
+                            <li><strong>Learned relationships:</strong> Discovers what's important</li>
+                            <li><strong>Position-aware:</strong> Through learned embeddings</li>
+                            <li><strong>Needs more data:</strong> Less inductive bias to learn</li>
+                            <li><strong>Good for:</strong> Long-range correlations, complex patterns</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="key-insight">
+                    <strong>For your turbulence data:</strong> Mach number might depend on global flow patterns across the entire domain. ViT can capture correlations between distant regions (e.g., shock structures) that CNNs might miss without very deep networks.
+                </div>
+            </div>
+
+            <!-- Computational Aspects -->
+            <div class="section">
+                <h2>⚡ Computational Considerations</h2>
+                
+                <h3>Complexity Analysis</h3>
+                <div class="math-block">
+                    <p><strong>CNN:</strong> O(k² x C x H x W) per layer</p>
+                    <p>k=kernel size, C=channels, HxW=spatial dimensions</p>
+                    <p style="margin-top: 20px;"><strong>Self-Attention:</strong> O(N² x D)</p>
+                    <p>N=sequence length (64 patches), D=embedding dim (384)</p>
+                </div>
+
+                <div class="concept-box">
+                    <h4>Your Model Numbers:</h4>
+                    <ul>
+                        <li>Patches: 8x8 = 64 (N = 64)</li>
+                        <li>Attention complexity: 64² x 384 ≈ 1.5M operations per head</li>
+                        <li>6 heads x 6 layers = 36 attention operations per forward pass</li>
+                        <li>Compare to CNN: Much fewer parameters, but more compute per operation</li>
+                    </ul>
+                </div>
+
+                <h3>Memory vs Computation Trade-off</h3>
+                <div class="code-block">
+                    <pre>
+# Attention matrix: [B, num_heads, N, N]
+# For your setup: [64, 6, 64, 64] = 1.5M values per batch
+# This is the attention "map" - who attends to whom
+
+# Compare to CNN feature maps:
+# Your enc4: [64, 256, 16, 16] = 4.2M values
+# Similar memory, but different operations
+                    </pre>
+                </div>
+            </div>
+
+            <!-- Practical Tips -->
+            <div class="section">
+                <h2> Practical Tips for Your Implementation</h2>
+                
+                <div class="concept-box">
+                    <h3>Hyperparameters to Experiment With:</h3>
+                    <ol>
+                        <li><strong>Patch Size (16 → 8 or 32):</strong>
+                            <ul>
+                                <li>Smaller = more patches = more computation, finer detail</li>
+                                <li>Larger = fewer patches = faster, more global</li>
+                                <li>Your 128x128: try 8 (256 patches) or 32 (16 patches)</li>
+                            </ul>
+                        </li>
+                        
+                        <li><strong>Embedding Dimension (384):</strong>
+                            <ul>
+                                <li>Smaller (256): Faster, less capacity</li>
+                                <li>Larger (512, 768): More expressive, slower</li>
+                                <li>Rule of thumb: embed_dim ≈ 4-6 x patch_size²</li>
+                            </ul>
+                        </li>
+                        
+                        <li><strong>Depth (6 blocks):</strong>
+                            <ul>
+                                <li>Fewer (4): Faster training, might underfit</li>
+                                <li>More (8-12): More capacity, risk overfitting with 14k samples</li>
+                            </ul>
+                        </li>
+                        
+                        <li><strong>Number of Heads (6):</strong>
+                            <ul>
+                                <li>Must divide embed_dim evenly</li>
+                                <li>More heads = more diverse attention patterns</li>
+                                <li>Typical: 4, 6, 8, or 12 heads</li>
+                            </ul>
+                        </li>
+                    </ol>
+                </div>
+
+                <div class="key-insight">
+                    <strong>Training Tip:</strong> ViTs often need:
+                    <ul>
+                        <li>More epochs than CNNs (they learn slower initially)</li>
+                        <li>Stronger data augmentation (your random shifts help!)</li>
+                        <li>Learning rate warmup (gradual increase at start)</li>
+                        <li>Higher weight decay (0.01-0.05)</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Summary -->
+            <div class="section">
+                <h2> Summary: The Big Picture</h2>
+                
+                <div class="concept-box">
+                    <h3>What makes ViT different:</h3>
+                    <p><strong>1. Global Context:</strong> Every patch can attend to every other patch from the first layer. Your CNN needs many layers to build this global view.</p>
+                    
+                    <p><strong>2. Data-Driven Relationships:</strong> Attention learns what to look at. CNNs have hard-coded local neighborhoods.</p>
+                    
+                    <p><strong>3. Parallel Processing:</strong> All patch-to-patch relationships computed simultaneously. CNNs process sequentially.</p>
+                    
+                    <p><strong>4. Flexible Architecture:</strong> Easy to scale up (more heads, deeper, wider) without changing fundamental operations.</p>
+                </div>
+
+                <div class="key-insight">
+                    <strong>When to use ViT for your turbulence data:</strong>
+                    <ul>
+                        <li>✅ Mach number depends on global flow structures</li>
+                        <li>✅ Long-range spatial correlations matter</li>
+                        <li>✅ You have 14k training samples (decent amount)</li>
+                        <li>✅ You want to experiment with attention patterns</li>
+                        <li>⚠️ Might be overkill if local features dominate</li>
+                        <li>⚠️ Slower to train than your CNN initially</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Attention Visualization
+        const attentionCanvas = document.getElementById('attentionCanvas');
+        const attentionCtx = attentionCanvas.getContext('2d');
+        const gridSize = 8;
+        const cellSize = 60;
+        let selectedPatch = null;
+        let attentionWeights = Array(gridSize * gridSize).fill(0);
+
+        function drawAttentionGrid() {
+            attentionCtx.clearRect(0, 0, attentionCanvas.width, attentionCanvas.height);
+            
+            for (let i = 0; i < gridSize; i++) {
+                for (let j = 0; j < gridSize; j++) {
+                    const idx = i * gridSize + j;
+                    const x = j * cellSize + 50;
+                    const y = i * cellSize + 20;
+                    
+                    const intensity = attentionWeights[idx];
+                    attentionCtx.fillStyle = `rgba(102, 126, 234, ${intensity})`;
+                    attentionCtx.fillRect(x, y, cellSize - 2, cellSize - 2);
+                    
+                    attentionCtx.strokeStyle = '#333';
+                    attentionCtx.lineWidth = selectedPatch === idx ? 3 : 1;
+                    attentionCtx.strokeRect(x, y, cellSize - 2, cellSize - 2);
+                    
+                    if (selectedPatch === idx) {
+                        attentionCtx.fillStyle = 'rgba(255, 215, 0, 0.5)';
+                        attentionCtx.fillRect(x, y, cellSize - 2, cellSize - 2);
+                    }
+                    
+                    // Draw attention value
+                    if (intensity > 0.1) {
+                        attentionCtx.fillStyle = '#fff';
+                        attentionCtx.font = '12px Arial';
+                        attentionCtx.textAlign = 'center';
+                        attentionCtx.fillText(intensity.toFixed(2), x + cellSize/2 - 1, y + cellSize/2 + 4);
+                    }
+                }
+            }
+            
+            // Draw label
+            attentionCtx.fillStyle = '#333';
+            attentionCtx.font = 'bold 14px Arial';
+            attentionCtx.textAlign = 'left';
+            attentionCtx.fillText('Click a patch to see its attention weights', 50, 15);
+        }
+
+        attentionCanvas.addEventListener('click', (e) => {
+            const rect = attentionCanvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            const col = Math.floor((x - 50) / cellSize);
+            const row = Math.floor((y - 20) / cellSize);
+            
+            if (col >= 0 && col < gridSize && row >= 0 && row < gridSize) {
+                selectedPatch = row * gridSize + col;
+                randomizeAttention();
+            }
+        });
+
+        function randomizeAttention() {
+            if (selectedPatch === null) selectedPatch = 28; // Center patch
+            
+            // Generate attention weights (softmax of random scores)
+            const scores = Array(gridSize * gridSize).fill(0).map(() => Math.random() * 2 - 1);
+            
+            // Apply softmax
+            const expScores = scores.map(s => Math.exp(s));
+            const sumExp = expScores.reduce((a, b) => a + b, 0);
+            attentionWeights = expScores.map(s => s / sumExp);
+            
+            drawAttentionGrid();
+        }
+
+        function localAttention() {
+            if (selectedPatch === null) selectedPatch = 28;
+            
+            const row = Math.floor(selectedPatch / gridSize);
+            const col = selectedPatch % gridSize;
+            
+            attentionWeights = Array(gridSize * gridSize).fill(0);
+            
+            //High attention to nearby patches
+            for (let i = 0; i < gridSize; i++) {
+                for (let j = 0; j < gridSize; j++) {
+                    const idx = i * gridSize + j;
+                    const dist = Math.abs(i - row) + Math.abs(j - col);
+                    if (dist === 0) attentionWeights[idx] = 0.5;
+                    else if (dist === 1) attentionWeights[idx] = 0.3;
+                    else if (dist === 2) attentionWeights[idx] = 0.1;
+                }
+            }
+            
+            // Normalize
+            const sum = attentionWeights.reduce((a, b) => a + b, 0);
+            attentionWeights = attentionWeights.map(w => w / sum);
+            
+            drawAttentionGrid();
+        }
+
+        function globalAttention() {
+            if (selectedPatch === null) selectedPatch = 28;
+            
+            // Uniform attention to all patches
+            attentionWeights = Array(gridSize * gridSize).fill(1 / (gridSize * gridSize));
+            
+            drawAttentionGrid();
+        }
+
+        // Initialize
+        randomizeAttention();
+
+        // ============================================
+        // MULTI-HEAD ATTENTION VISUALIZATION
+        // ============================================
+        const multiHeadCanvas = document.getElementById('multiHeadCanvas');
+        const multiHeadCtx = multiHeadCanvas.getContext('2d');
+
+        function drawMultiHeadAttention() {
+            multiHeadCtx.clearRect(0, 0, multiHeadCanvas.width, multiHeadCanvas.height);
+            
+            const numHeads = 6;
+            const headWidth = 100;
+            const headHeight = 200;
+            const spacing = 20;
+            const startX = 20;
+            const startY = 50;
+            
+            // Title
+            multiHeadCtx.fillStyle = '#333';
+            multiHeadCtx.font = 'bold 16px Arial';
+            multiHeadCtx.fillText('6 Attention Heads - Each Learns Different Patterns', startX, 30);
+            
+            const headNames = ['Density', 'Velocity', 'Spatial', 'Structure', 'Gradients', 'Global'];
+            const colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c'];
+            
+            for (let h = 0; h < numHeads; h++) {
+                const x = startX + h * (headWidth + spacing);
+                const y = startY;
+                
+                // Draw head box
+                multiHeadCtx.fillStyle = colors[h];
+                multiHeadCtx.globalAlpha = 0.3;
+                multiHeadCtx.fillRect(x, y, headWidth, headHeight);
+                multiHeadCtx.globalAlpha = 1.0;
+                
+                multiHeadCtx.strokeStyle = colors[h];
+                multiHeadCtx.lineWidth = 2;
+                multiHeadCtx.strokeRect(x, y, headWidth, headHeight);
+                
+                // Draw head label
+                multiHeadCtx.fillStyle = '#333';
+                multiHeadCtx.font = 'bold 12px Arial';
+                multiHeadCtx.textAlign = 'center';
+                multiHeadCtx.fillText(`Head ${h + 1}`, x + headWidth/2, y - 5);
+                multiHeadCtx.font = '10px Arial';
+                multiHeadCtx.fillText(headNames[h], x + headWidth/2, y + headHeight + 15);
+                
+                // Draw attention pattern
+                const miniGridSize = 4;
+                const miniCellSize = headWidth / miniGridSize;
+                
+                for (let i = 0; i < miniGridSize; i++) {
+                    for (let j = 0; j < miniGridSize; j++) {
+                        const intensity = Math.random();
+                        multiHeadCtx.fillStyle = `rgba(${parseInt(colors[h].slice(1,3), 16)}, 
+                                                        ${parseInt(colors[h].slice(3,5), 16)}, 
+                                                        ${parseInt(colors[h].slice(5,7), 16)}, ${intensity})`;
+                        multiHeadCtx.fillRect(x + j * miniCellSize + 5, 
+                                            y + i * miniCellSize + 30, 
+                                            miniCellSize - 2, miniCellSize - 2);
+                    }
+                }
+            }
+        }
+
+        drawMultiHeadAttention();
+
+        // ============================================
+        // PATCH EMBEDDING VISUALIZATION
+        // ============================================
+        const patchCanvas = document.getElementById('patchCanvas');
+        const patchCtx = patchCanvas.getContext('2d');
+
+        function drawPatchEmbedding() {
+            patchCtx.clearRect(0, 0, patchCanvas.width, patchCanvas.height);
+            
+            // Draw original image representation
+            patchCtx.fillStyle = '#333';
+            patchCtx.font = 'bold 14px Arial';
+            patchCtx.fillText('Original 128×128 Image', 20, 20);
+            
+            const imgSize = 256;
+            const imgX = 20;
+            const imgY = 30;
+            
+            // Draw gradient image
+            const gradient = patchCtx.createLinearGradient(imgX, imgY, imgX + imgSize, imgY + imgSize);
+            gradient.addColorStop(0, '#667eea');
+            gradient.addColorStop(1, '#764ba2');
+            patchCtx.fillStyle = gradient;
+            patchCtx.fillRect(imgX, imgY, imgSize, imgSize);
+            
+            // Draw 8×8 grid overlay
+            patchCtx.strokeStyle = '#fff';
+            patchCtx.lineWidth = 2;
+            const patchSizeVis = imgSize / 8;
+            
+            for (let i = 0; i <= 8; i++) {
+                patchCtx.beginPath();
+                patchCtx.moveTo(imgX, imgY + i * patchSizeVis);
+                patchCtx.lineTo(imgX + imgSize, imgY + i * patchSizeVis);
+                patchCtx.stroke();
+                
+                patchCtx.beginPath();
+                patchCtx.moveTo(imgX + i * patchSizeVis, imgY);
+                patchCtx.lineTo(imgX + i * patchSizeVis, imgY + imgSize);
+                patchCtx.stroke();
+            }
+            
+            // Label patches
+            patchCtx.fillStyle = '#fff';
+            patchCtx.font = 'bold 12px Arial';
+            patchCtx.textAlign = 'center';
+            patchCtx.fillText('16×16', imgX + patchSizeVis/2, imgY + patchSizeVis/2 + 5);
+            patchCtx.fillText('patches', imgX + patchSizeVis/2, imgY + patchSizeVis/2 + 20);
+            
+            // Arrow
+            patchCtx.fillStyle = '#333';
+            patchCtx.font = 'bold 24px Arial';
+            patchCtx.fillText('→', imgX + imgSize + 20, imgY + imgSize/2);
+            
+            // Draw sequence representation
+            const seqX = imgX + imgSize + 60;
+            const seqY = imgY + 50;
+            
+            patchCtx.fillStyle = '#333';
+            patchCtx.font = 'bold 14px Arial';
+            patchCtx.textAlign = 'left';
+            patchCtx.fillText('Sequence of 64 Patches', seqX, seqY - 30);
+            patchCtx.font = '12px Arial';
+            patchCtx.fillText('Each → 384-dim vector', seqX, seqY - 15);
+            
+            const patchBoxWidth = 40;
+            const patchBoxHeight = 120;
+            const patchSpacing = 5;
+            
+            for (let i = 0; i < 8; i++) {
+                const x = seqX + i * (patchBoxWidth + patchSpacing);
+                const y = seqY;
+                
+                // Color from original position
+                const hue = (i / 8) * 360;
+                patchCtx.fillStyle = `hsl(${hue}, 70%, 60%)`;
+                patchCtx.fillRect(x, y, patchBoxWidth, patchBoxHeight);
+                
+                patchCtx.strokeStyle = '#333';
+                patchCtx.lineWidth = 1;
+                patchCtx.strokeRect(x, y, patchBoxWidth, patchBoxHeight);
+                
+                patchCtx.fillStyle = '#333';
+                patchCtx.font = '10px Arial';
+                patchCtx.textAlign = 'center';
+                patchCtx.fillText(`P${i}`, x + patchBoxWidth/2, y + patchBoxHeight + 15);
+            }
+            
+            patchCtx.fillStyle = '#333';
+            patchCtx.font = '12px Arial';
+            patchCtx.fillText('... (64 total)', seqX + 8 * (patchBoxWidth + patchSpacing), seqY + patchBoxHeight/2);
+        }
+
+        drawPatchEmbedding();
+
+        // ============================================
+        // TRANSFORMER BLOCK VISUALIZATION
+        // ============================================
+        const blockCanvas = document.getElementById('blockCanvas');
+        const blockCtx = blockCanvas.getContext('2d');
+
+        function drawTransformerBlock() {
+            blockCtx.clearRect(0, 0, blockCanvas.width, blockCanvas.height);
+            
+            const boxWidth = 150;
+            const boxHeight = 50;
+            const centerX = blockCanvas.width / 2;
+            let currentY = 20;
+            
+            // Title
+            blockCtx.fillStyle = '#333';
+            blockCtx.font = 'bold 16px Arial';
+            blockCtx.textAlign = 'center';
+            blockCtx.fillText('Transformer Block Data Flow', centerX, currentY);
+            currentY += 30;
+            
+            // Helper function to draw box
+            function drawBox(text, y, color = '#667eea', isOperation = true) {
+                const x = centerX - boxWidth / 2;
+                
+                if (isOperation) {
+                    blockCtx.fillStyle = color;
+                    blockCtx.fillRect(x, y, boxWidth, boxHeight);
+                    blockCtx.strokeStyle = '#333';
+                    blockCtx.lineWidth = 2;
+                    blockCtx.strokeRect(x, y, boxWidth, boxHeight);
+                    
+                    blockCtx.fillStyle = '#fff';
+                    blockCtx.font = 'bold 14px Arial';
+                    blockCtx.textAlign = 'center';
+                    blockCtx.fillText(text, centerX, y + boxHeight/2 + 5);
+                } else {
+                    blockCtx.strokeStyle = color;
+                    blockCtx.lineWidth = 2;
+                    blockCtx.setLineDash([5, 5]);
+                    blockCtx.strokeRect(x, y, boxWidth, boxHeight);
+                    blockCtx.setLineDash([]);
+                    
+                    blockCtx.fillStyle = color;
+                    blockCtx.font = 'bold 12px Arial';
+                    blockCtx.textAlign = 'center';
+                    blockCtx.fillText(text, centerX, y + boxHeight/2 + 5);
+                }
+                
+                return y + boxHeight;
+            }
+            
+            // Helper function to draw arrow
+            function drawArrow(startY, endY, label = '') {
+                blockCtx.strokeStyle = '#333';
+                blockCtx.lineWidth = 2;
+                blockCtx.beginPath();
+                blockCtx.moveTo(centerX, startY);
+                blockCtx.lineTo(centerX, endY - 5);
+                blockCtx.stroke();
+                
+                // Arrow head
+                blockCtx.beginPath();
+                blockCtx.moveTo(centerX, endY);
+                blockCtx.lineTo(centerX - 5, endY - 8);
+                blockCtx.lineTo(centerX + 5, endY - 8);
+                blockCtx.closePath();
+                blockCtx.fillStyle = '#333';
+                blockCtx.fill();
+                
+                if (label) {
+                    blockCtx.fillStyle = '#e74c3c';
+                    blockCtx.font = 'bold 11px Arial';
+                    blockCtx.textAlign = 'left';
+                    blockCtx.fillText(label, centerX + 10, (startY + endY) / 2);
+                }
+            }
+            
+            // Draw the flow
+            const inputY = drawBox('Input x', currentY, '#3498db', false);
+            currentY = inputY + 10;
+            drawArrow(inputY, currentY);
+            
+            const norm1Y = drawBox('LayerNorm', currentY);
+            currentY = norm1Y + 10;
+            drawArrow(norm1Y, currentY);
+            
+            const attnY = drawBox('Multi-Head Attn', currentY, '#9b59b6');
+            currentY = attnY + 10;
+            
+            // Residual connection 1
+            blockCtx.strokeStyle = '#e74c3c';
+            blockCtx.lineWidth = 3;
+            blockCtx.setLineDash([5, 5]);
+            const skipX = centerX + boxWidth/2 + 30;
+            blockCtx.beginPath();
+            blockCtx.moveTo(centerX, inputY + boxHeight/2);
+            blockCtx.lineTo(skipX, inputY + boxHeight/2);
+            blockCtx.lineTo(skipX, currentY + boxHeight/2);
+            blockCtx.lineTo(centerX + boxWidth/2, currentY + boxHeight/2);
+            blockCtx.stroke();
+            blockCtx.setLineDash([]);
+            
+            drawArrow(attnY, currentY);
+            const add1Y = drawBox('Add (residual)', currentY, '#2ecc71');
+            currentY = add1Y + 10;
+            drawArrow(add1Y, currentY);
+            
+            const norm2Y = drawBox('LayerNorm', currentY);
+            currentY = norm2Y + 10;
+            drawArrow(norm2Y, currentY);
+            
+            const mlpY = drawBox('MLP (FFN)', currentY, '#f39c12');
+            currentY = mlpY + 10;
+            
+            // Residual connection 2
+            blockCtx.strokeStyle = '#e74c3c';
+            blockCtx.lineWidth = 3;
+            blockCtx.setLineDash([5, 5]);
+            blockCtx.beginPath();
+            blockCtx.moveTo(centerX, add1Y + boxHeight/2);
+            blockCtx.lineTo(skipX, add1Y + boxHeight/2);
+            blockCtx.lineTo(skipX, currentY + boxHeight/2);
+            blockCtx.lineTo(centerX + boxWidth/2, currentY + boxHeight/2);
+            blockCtx.stroke();
+            blockCtx.setLineDash([]);
+            
+            drawArrow(mlpY, currentY);
+            const add2Y = drawBox('Add (residual)', currentY, '#2ecc71');
+            currentY = add2Y + 10;
+            drawArrow(add2Y, currentY);
+            
+            const outputY = drawBox('Output x', currentY, '#3498db', false);
+            
+            // Add legend
+            blockCtx.fillStyle = '#e74c3c';
+            blockCtx.font = '12px Arial';
+            blockCtx.textAlign = 'left';
+            blockCtx.fillText('--- Skip Connections', 20, blockCanvas.height - 10);
+        }
+
+        drawTransformerBlock();
+
+        console.log('Vision Transformer visualization loaded successfully!');
+    </script>
+</body>
+</html>

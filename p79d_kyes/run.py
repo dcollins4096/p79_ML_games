@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import time
 import loader
 import matplotlib as mpl
+sys.path.append('/home/dcollins/repos/')
 import dtools_global.vis.pcolormesh_helper as pch
 from scipy.stats import pearsonr
 import tqdm
