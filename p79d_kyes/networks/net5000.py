@@ -39,12 +39,12 @@ fname_valid = "p79d_subsets_S128_N1_xyz_suite7vs_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 1400
+ntrain = 14000
 #nvalid=3
 #ntrain = 10
 nvalid=30
 ntest = 5000
-downsample = None
+downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 1e6
@@ -122,7 +122,7 @@ class SphericalDataset(Dataset):
         ms = self.quan['Ms_act'][idx]
         ma = self.quan['Ma_act'][idx]
         theset[2] = torch.sqrt(theset[2])
-        return theset[0:3].to(device), torch.tensor([ms], dtype=torch.float32).to(device)
+        return theset[0:2].to(device), torch.tensor([ms], dtype=torch.float32).to(device)
 
 # ---------------------------
 # Utils
@@ -169,7 +169,7 @@ def trainer(
 
     best_val = float("inf")
     best_state = None
-    load_best = False
+    load_best = True
     patience = epochs
     bad_epochs = 0
 
@@ -274,6 +274,7 @@ def trainer(
 
     # restore best
     if best_state is not None and load_best:
+        print(f'Load best state; best val {best_val:.4f}')
         model.load_state_dict(best_state)
     return model
 
@@ -356,7 +357,7 @@ class main_net(nn.Module):
     """
     def __init__(
         self,
-        in_ch: int = 3,
+        in_ch: int = 2,
         base: int = 32,
         drop: float = 0.05,
         mlp_drop: float = 0.2,
@@ -416,8 +417,8 @@ class main_net(nn.Module):
 
         out = self.head(x)           # [B, 1] or [B, 2]
         if self.with_uncertainty:
-            mean = out[:, 0]
-            logvar = out[:, 1].clamp(-10, 5)  # stabilize
+            mean = out[:, 0:1]
+            logvar = out[:, 1:2].clamp(-10, 5)  # stabilize
             return (mean, logvar)
         else:
             return out[:, 0]
@@ -436,102 +437,4 @@ def gaussian_nll(mean_logvar, target):
     # 0.5*(logvar + (y-m)^2/exp(logvar))
     return 0.5 * (logvar + (target - mean) ** 2 * torch.exp(-logvar)).mean()
 
-
-# ----------------------------
-# Training loop skeleton
-# ----------------------------
-@dataclass
-class TrainConfig:
-    lr: float = 3e-4
-    weight_decay: float = 1e-3
-    epochs: int = 50
-    grad_clip: float = 1.0
-    log_target: bool = True          # often helps since Mach spans a range
-    with_uncertainty: bool = True
-
-
-def train_one_epoch(model, loader, opt, device, cfg: TrainConfig):
-    model.train()
-    total = 0.0
-    n = 0
-    for x, y in loader:
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
-
-        opt.zero_grad(set_to_none=True)
-
-        if cfg.with_uncertainty:
-            mean, logvar = model(x)
-            loss = gaussian_nll(mean, logvar, y)
-        else:
-            pred = model(x)
-            loss = F.mse_loss(pred, y)
-
-        loss.backward()
-        if cfg.grad_clip is not None:
-            nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
-        opt.step()
-
-        bs = x.size(0)
-        total += loss.item() * bs
-        n += bs
-    return total / max(n, 1)
-
-
-@torch.no_grad()
-def evaluate(model, loader, device, cfg: TrainConfig) -> Tuple[float, float]:
-    model.eval()
-    mse_sum = 0.0
-    n = 0
-    for x, y in loader:
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
-
-        if cfg.with_uncertainty:
-            mean, _ = model(x)
-            pred = mean
-        else:
-            pred = model(x)
-
-        mse_sum += ((pred - y) ** 2).sum().item()
-        n += x.size(0)
-
-    rmse = math.sqrt(mse_sum / max(n, 1))
-    return rmse, mse_sum / max(n, 1)
-
-
-def run_training(train_ds, val_ds, cfg: TrainConfig, batch_size=32, num_workers=4):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
-                            num_workers=num_workers, pin_memory=True)
-
-    model = MachRegressor(
-        in_ch=3,
-        base=32,
-        predict_log_mach=cfg.log_target,
-        with_uncertainty=cfg.with_uncertainty,
-    ).to(device)
-
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.epochs)
-
-    best = float("inf")
-    for epoch in range(cfg.epochs):
-        tr_loss = train_one_epoch(model, train_loader, opt, device, cfg)
-        rmse, _ = evaluate(model, val_loader, device, cfg)
-        sched.step()
-
-        # If you trained on log(M), convert RMSE back to Mach-ish units is nontrivial;
-        # but rmse in log space is still a good optimization signal.
-        if rmse < best:
-            best = rmse
-            best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
-
-        print(f"epoch {epoch:03d}  train_loss={tr_loss:.4e}  val_rmse={rmse:.4e}")
-
-    model.load_state_dict(best_state)
-    return model
 
