@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3112
-what = "3110 with Athena suite"
+idd = 3301
+what = "place holder."
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -31,15 +31,12 @@ fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
 fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
 fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
-fname_train = "p79d_subsets_S128_N1_xyz_suite7b_first.h5"
-fname_valid = "p79d_subsets_S128_N1_xyz_suite7b_second.h5"
-
-
-
+#fname_train = "p79d_subsets_S512_N3_xyz_T_even.h5"
+#fname_valid = "p79d_subsets_S512_N3_xyz_T_odd.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 14000
+ntrain = 10000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -48,8 +45,8 @@ downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 1e6
-epochs = 50
-lr = 0.5e-3
+epochs = 100
+lr = 1e-4
 #lr = 1e-4
 batch_size=64
 lr_schedule=[1000]
@@ -159,7 +156,7 @@ def trainer(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * max(1, len(train_loader))
-    print("Total Steps", total_steps, "ntrain", min(ntrain,len(all_data['train'])), "epoch", epochs, "down", downsample)
+    print("Total Steps", total_steps, "ntrain", ntrain, "epoch", epochs, "down", downsample)
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
@@ -532,12 +529,31 @@ def pearson_loss(pred, target, eps=1e-8):
     r = F.cosine_similarity(pred, target, dim=1)  # [B]
     return 1 - r.mean()
 
+import math
+
+def gaussian_nll(mu, log_sigma, y, eps=1e-6):
+    """
+    Heteroscedastic Gaussian negative log-likelihood, up to an additive constant.
+
+    mu:        [B, 1]
+    log_sigma: [B, 1]
+    y:         [B, 1]
+    """
+    # Optional clamp to avoid insane sigmas
+    log_sigma = log_sigma.clamp(min=-10.0, max=10.0)
+    sigma = torch.exp(log_sigma) + eps  # treat log_sigma as log(sigma)
+
+    # NLL (dropping constant 0.5*log(2π))
+    nll = 0.5 * ((y - mu) ** 2 / (sigma ** 2) + 2.0 * log_sigma)
+    return nll.mean()
+
+
 class main_net(nn.Module):
     def __init__(self, in_channels=1, out_channels=3, base_channels=32,
                  use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
                  use_cross_attention=True, attn_heads=1, epochs=epochs, pool_type='max', 
                  err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=1,
-                 suffix='', dropout_1=0, dropout_2=0, dropout_3=0, predict_scalars=True, n_scalars=1):
+                 suffix='', dropout_1=0, dropout_2=0, dropout_3=0, predict_scalars=True, n_scalars=2):
         super().__init__()
         arg_dict = locals()
         self.use_fc_bottleneck = use_fc_bottleneck
@@ -555,6 +571,7 @@ class main_net(nn.Module):
         self.rotation_prob=rotation_prob
         self.predict_scalars = predict_scalars
         self.predict_scalars_only = True
+        self.predict_mu_sigma = True
         self.n_scalars = n_scalars
         if 0:
             for arg in arg_dict:
@@ -607,9 +624,15 @@ class main_net(nn.Module):
         if use_cross_attention:
             self.cross_attn = CrossAttention(out_channels, num_heads=attn_heads)
 
+        import math
         if self.predict_scalars:
             in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
-            self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.Linear(in_dim, self.n_scalars))
+            #self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.ReLU(),nn.Linear(in_dim, self.n_scalars))
+            self.fc_out = nn.Linear(in_dim, self.n_scalars)
+            nn.init.xavier_uniform_(self.fc_out.weight)
+            nn.init.zeros_(self.fc_out.bias)
+            with torch.no_grad():
+                self.fc_out.bias[1].fill_(math.log(0.3**2))
 
 
         self.register_buffer("train_curve", torch.zeros(epochs))
@@ -734,8 +757,22 @@ class main_net(nn.Module):
 
         return all_loss
 
-    def criterion2(self,preds,target):
-        return {'mse':F.mse_loss(preds, target)}
+    def criterion2(self, preds, target):
+        """
+        Scalar-mode loss: heteroscedastic Gaussian NLL.
+
+        preds:  [B, 2]  -> [mu, log_sigma]
+        target: [B, 1]  -> true Ms
+        """
+        # Ensure shape [B,1] for both
+        mu        = preds[:, 0:1]
+        log_sigma = preds[:, 1:2]
+        y         = target[:, 0:1]
+
+        nll = gaussian_nll(mu, log_sigma, y)
+        mse = F.mse_loss(mu, y)
+        return {'nll': nll, 'mse':mse}
+
     def criterion(self, preds, target):
         losses = self.criterion1(preds,target)
 

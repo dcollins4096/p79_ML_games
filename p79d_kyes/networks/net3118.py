@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3112
-what = "3110 with Athena suite"
+idd = 3118
+what = "3112 long density.  Several arch changes."
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -39,7 +39,7 @@ fname_valid = "p79d_subsets_S128_N1_xyz_suite7b_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 14000
+ntrain = 50000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -49,12 +49,12 @@ downsample = 64
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 1e6
 epochs = 50
-lr = 0.5e-3
+lr = 0.5e-2
 #lr = 1e-4
 batch_size=64
-lr_schedule=[1000]
-weight_decay = 1e-2
-fc_bottleneck=True
+lr_schedule=[10]
+weight_decay = 1e-4
+fc_bottleneck=False
 def load_data():
 
     print('read the data')
@@ -119,6 +119,8 @@ class SphericalDataset(Dataset):
         dy = torch.randint(0, H, (1,)).item()
         dx = torch.randint(0, W, (1,)).item()
         theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
+        theset = torch.log1p(theset)
+        #theset = torch.log1p(self.all_data[idx])
         ms = self.quan['Ms_act'][idx]
         ma = self.quan['Ma_act'][idx]
         return theset[0].to(device), torch.tensor([ms], dtype=torch.float32).to(device)
@@ -168,8 +170,8 @@ def trainer(
 
     best_val = float("inf")
     best_state = None
-    load_best = False
-    patience = 1e6
+    load_best = True
+    patience = 20
     bad_epochs = 0
 
     train_curve, val_curve = [], []
@@ -609,7 +611,14 @@ class main_net(nn.Module):
 
         if self.predict_scalars:
             in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
-            self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.Linear(in_dim, self.n_scalars))
+            #self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.Linear(in_dim, self.n_scalars))
+            self.fc_out = nn.Sequential(
+                    nn.LayerNorm(in_dim),
+                    nn.Linear(in_dim, in_dim*2),
+                    nn.GELU(),
+                    nn.Dropout(0.2),
+                    nn.Linear(in_dim*2, self.n_scalars),
+            )
 
 
         self.register_buffer("train_curve", torch.zeros(epochs))
@@ -734,8 +743,11 @@ class main_net(nn.Module):
 
         return all_loss
 
-    def criterion2(self,preds,target):
-        return {'mse':F.mse_loss(preds, target)}
+#    def criterion2(self,preds,target):
+#        return {'mse':F.mse_loss(preds, target)}
+    def criterion2(self, preds, target):
+        return {'huber': F.smooth_l1_loss(preds, target, beta=0.5)}
+
     def criterion(self, preds, target):
         losses = self.criterion1(preds,target)
 

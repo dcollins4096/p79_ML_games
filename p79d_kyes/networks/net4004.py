@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3112
-what = "3110 with Athena suite"
+idd = 4004
+what = "4003 with log everything"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -31,8 +31,8 @@ fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
 fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
 fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
-fname_train = "p79d_subsets_S128_N1_xyz_suite7b_first.h5"
-fname_valid = "p79d_subsets_S128_N1_xyz_suite7b_second.h5"
+fname_train = "p79d_subsets_S128_N1_xyz_suite7vs_first.h5"
+fname_valid = "p79d_subsets_S128_N1_xyz_suite7vs_second.h5"
 
 
 
@@ -48,7 +48,7 @@ downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 1e6
-epochs = 50
+epochs = 30
 lr = 0.5e-3
 #lr = 1e-4
 batch_size=64
@@ -119,9 +119,10 @@ class SphericalDataset(Dataset):
         dy = torch.randint(0, H, (1,)).item()
         dx = torch.randint(0, W, (1,)).item()
         theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
+        theset[0] = torch.log(theset[0])
         ms = self.quan['Ms_act'][idx]
         ma = self.quan['Ma_act'][idx]
-        return theset[0].to(device), torch.tensor([ms], dtype=torch.float32).to(device)
+        return theset[0:3].to(device), torch.log(torch.tensor([ms], dtype=torch.float32).to(device))
 
 # ---------------------------
 # Utils
@@ -175,15 +176,9 @@ def trainer(
     train_curve, val_curve = [], []
     t0 = time.time()
     verbose=False
-    save_err_Cross = -1
-    if model.err_Cross > 0:
-        save_err_Cross = model.err_Cross
-        model.err_Cross = torch.tensor(0.0)
 
 
     for epoch in range(1, epochs+1):
-        if epoch > 50 and save_err_Cross>0:
-            model.err_Cross = save_err_Cross
         model.train()
         if verbose:
             print("Epoch %d"%epoch)
@@ -284,76 +279,6 @@ def trainer(
 
     # quick plot (optional)
 
-def plot_loss_curve(model):
-    plt.clf()
-    plt.plot(model.train_curve.cpu(), label="train")
-    plt.plot(model.val_curve.cpu(),   label="val")
-    plt.yscale("log")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig("%s/plots/errtime_net%04d"%(os.environ['HOME'], model.idd))
-
-def power_spectrum_delta(guess,target):
-    T_guess = torch_power.powerspectrum(guess)
-    T_target = torch_power.powerspectrum(target)
-    output = torch.mean( torch.abs(torch.log(T_guess.avgpower/(T_target.avgpower+1e-8))))
-    return output
-
-def power_spectra_crit(guess,target):
-    err_T = power_spectrum_delta(guess[:,0:1,:,:], target[:,0:1,:,:])
-    err_E = power_spectrum_delta(guess[:,1:2,:,:], target[:,1:2,:,:])
-    err_B = power_spectrum_delta(guess[:,2:3,:,:], target[:,2:3,:,:])
-    return err_T+err_E+err_B
-
-def cross_spectrum_delta(guess,target):
-    T_guess = torch_power.crossspectrum(guess, target)
-    T_target = torch_power.powerspectrum(target)
-    num = torch.clamp(torch.abs(T_guess.avgpower), min=1e-12)
-    den = torch.clamp(T_target.avgpower, min=1e-12)
-    output = torch.mean(torch.abs(torch.log(num / den)))
-    if (T_guess.avgpower < 0).any():
-            negative = torch.mean(torch.abs(T_guess.avgpower[T_guess.avgpower < 0]))
-    else:
-            negative = 0.0
-    return output+negative
-
-def cross_spectrum_cosine(guess, target):
-    G = torch.fft.fftn(guess, dim=(-2, -1))
-    T = torch.fft.fftn(target, dim=(-2, -1))
-    num = torch.sum(G * torch.conj(T)).real
-    denom = torch.sqrt(torch.sum(torch.abs(G)**2) * torch.sum(torch.abs(T)**2))
-    return 1 - num / (denom + 1e-12)
-
-def cross_spectra_crit(guess,target):
-    err_T = cross_spectrum_cosine(guess[:,0:1,:,:], target[:,0:1,:,:])
-    err_E = cross_spectrum_cosine(guess[:,1:2,:,:], target[:,1:2,:,:])
-    err_B = cross_spectrum_cosine(guess[:,2:3,:,:], target[:,2:3,:,:])
-    return err_T+err_E+err_B
-
-import bispectrum
-def bispectrum_crit(guess,target):
-    nsamples=100
-    T_guess = bispectrum.compute_bispectrum_torch(guess[:,0:1,:,:]  ,nsamples=nsamples)[0]
-    E_guess = bispectrum.compute_bispectrum_torch(guess[:,1:2,:,:]  ,nsamples=nsamples)[0]
-    B_guess = bispectrum.compute_bispectrum_torch(guess[:,2:3,:,:]  ,nsamples=nsamples)[0]
-    T_target = bispectrum.compute_bispectrum_torch(target[:,0:1,:,:],nsamples=nsamples)[0]
-    E_target = bispectrum.compute_bispectrum_torch(target[:,1:2,:,:],nsamples=nsamples)[0]
-    B_target = bispectrum.compute_bispectrum_torch(target[:,2:3,:,:],nsamples=nsamples)[0]
-    dT = torch.mean(torch.abs(torch.log(torch.abs( T_guess / T_target))))
-    dE = torch.mean(torch.abs(torch.log(torch.abs( E_guess / E_target))))
-    dB = torch.mean(torch.abs(torch.log(torch.abs( B_guess / B_target))))
-    #pdb.set_trace()
-    return dT+dE+dB
-
-def error_real_imag(guess,target):
-
-    L1  = F.l1_loss(guess.real, target.real)
-    L1 += F.l1_loss(guess.imag, target.imag)
-    return L1
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 class ResidualBlockSE(nn.Module):
     def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0, dilation=1):
@@ -426,40 +351,6 @@ class ResidualBlockSE(nn.Module):
         return F.relu(out)
 
 
-def ssim_loss(pred, target, window_size=11, C1=0.01**2, C2=0.03**2):
-    """
-    Compute SSIM loss: 1 - SSIM (so that lower is better).
-    pred, target: [B, C, H, W]
-    """
-    # Gaussian kernel for local statistics
-    def gaussian_window(window_size, sigma=1.5):
-        coords = torch.arange(window_size, dtype=torch.float)
-        coords -= window_size // 2
-        g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
-        g /= g.sum()
-        return g
-
-    device = pred.device
-    channel = pred.size(1)
-    window = gaussian_window(window_size).to(device)
-    window_2d = (window[:, None] * window[None, :]).unsqueeze(0).unsqueeze(0)
-    window_2d = window_2d.repeat(channel, 1, 1, 1)
-
-    mu_pred = F.conv2d(pred, window_2d, padding=window_size//2, groups=channel)
-    mu_target = F.conv2d(target, window_2d, padding=window_size//2, groups=channel)
-
-    mu_pred_sq = mu_pred.pow(2)
-    mu_target_sq = mu_target.pow(2)
-    mu_pred_target = mu_pred * mu_target
-
-    sigma_pred_sq = F.conv2d(pred * pred, window_2d, padding=window_size//2, groups=channel) - mu_pred_sq
-    sigma_target_sq = F.conv2d(target * target, window_2d, padding=window_size//2, groups=channel) - mu_target_sq
-    sigma_pred_target = F.conv2d(pred * target, window_2d, padding=window_size//2, groups=channel) - mu_pred_target
-
-    ssim_map = ((2 * mu_pred_target + C1) * (2 * sigma_pred_target + C2)) / \
-               ((mu_pred_sq + mu_target_sq + C1) * (sigma_pred_sq + sigma_target_sq + C2))
-
-    return 1 - ssim_map.mean()  # SSIM loss
 
 class CrossAttention(nn.Module):
     def __init__(self, channels, num_heads=4):
@@ -476,82 +367,17 @@ class CrossAttention(nn.Module):
         return x_attn.transpose(1, 2).view(B, C, H, W)
 
 
-def gradient_loss(pred, target):
-    """
-    Computes a gradient (edge-aware) loss between pred and target.
-    Both tensors should be [B, C, H, W].
-    Returns a scalar loss.
-    """
-    # Compute gradients in x and y direction
-    pred_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
-    pred_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
-    target_dx = target[:, :, :, 1:] - target[:, :, :, :-1]
-    target_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
-
-    loss_x = F.l1_loss(pred_dx, target_dx)
-    loss_y = F.l1_loss(pred_dy, target_dy)
-
-    return loss_x + loss_y
-
-def my_pearsonr(x, y, eps=1e-8):
-    """
-    Compute Pearson correlation coefficient between two tensors x and y.
-    x and y must have the same shape.
-    """
-    x_mean = x.mean()
-    y_mean = y.mean()
-
-    xm = x - x_mean
-    ym = y - y_mean
-
-    r_num = torch.sum(xm * ym)
-    r_den = torch.sqrt(torch.sum(xm ** 2) * torch.sum(ym ** 2) + eps)
-
-    return r_num / r_den
-
-   
-import torch
-import torch.nn.functional as F
-
-def pearson_loss(pred, target, eps=1e-8):
-    """
-    pred, target: [B, 1, H, W]
-    Computes 1 - Pearson correlation (mean over batch)
-    """
-    B = pred.shape[0]
-    pred = pred.reshape(B, -1)
-    target = target.reshape(B, -1)
-
-    # zero-mean + variance normalize
-    pred = pred - pred.mean(dim=1, keepdim=True)
-    target = target - target.mean(dim=1, keepdim=True)
-
-    pred = pred / (pred.norm(dim=1, keepdim=True) + eps)
-    target = target / (target.norm(dim=1, keepdim=True) + eps)
-
-    r = F.cosine_similarity(pred, target, dim=1)  # [B]
-    return 1 - r.mean()
-
 class main_net(nn.Module):
-    def __init__(self, in_channels=1, out_channels=3, base_channels=32,
+    def __init__(self, in_channels=3, out_channels=3, base_channels=32,
                  use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
                  use_cross_attention=True, attn_heads=1, epochs=epochs, pool_type='max', 
-                 err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=1,
                  suffix='', dropout_1=0, dropout_2=0, dropout_3=0, predict_scalars=True, n_scalars=1):
         super().__init__()
-        arg_dict = locals()
+        self.predict_log = True
         self.use_fc_bottleneck = use_fc_bottleneck
         self.fc_spatial = fc_spatial
         self.dropout_2=dropout_2
         self.use_cross_attention=use_cross_attention
-        self.err_L1=err_L1
-        self.err_Multi=err_Multi
-        self.err_Pear=err_Pear
-        self.err_SSIM=err_SSIM
-        self.err_Grad=err_Grad
-        self.err_Power=err_Power
-        self.err_Bisp=err_Bisp
-        self.err_Cross=err_Cross
         self.rotation_prob=rotation_prob
         self.predict_scalars = predict_scalars
         self.predict_scalars_only = True
@@ -585,27 +411,6 @@ class main_net(nn.Module):
             self.fc2 = nn.Linear(fc_hidden, base_channels*8*fc_spatial*fc_spatial)
 
         # Learned upsampling via ConvTranspose2d
-        self.up4 = nn.ConvTranspose2d(base_channels*8, base_channels*8, kernel_size=3, stride=2, padding=1, output_padding=1)
-        self.up3 = nn.ConvTranspose2d(base_channels*4, base_channels*4, kernel_size=3, stride=2, padding=1, output_padding=1)
-        self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
-
-        # Decoder with skip connections
-        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, 
-                                    pool_type=pool_type, dropout_p=dropout_3, dilation=d4)
-        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, 
-                                    pool_type=pool_type, dropout_p=dropout_3, dilation = d3)
-        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, 
-                                    pool_type=pool_type, dropout_p=dropout_3, dilation = d2)
-        self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
-
-        # --- Multi-scale output heads ---
-        self.out_d4 = nn.Conv2d(base_channels*4, out_channels, 3, padding=1)
-        self.out_d3 = nn.Conv2d(base_channels*2, out_channels, 3, padding=1)
-        self.out_d2 = nn.Conv2d(base_channels,   out_channels, 3, padding=1)
-
-        # Optional cross-attention
-        if use_cross_attention:
-            self.cross_attn = CrossAttention(out_channels, num_heads=attn_heads)
 
         if self.predict_scalars:
             in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
@@ -649,92 +454,10 @@ class main_net(nn.Module):
             # Return [B, n_scalars] instead of images
             return self.fc_out(feat)
 
-        # Decoder
-        d4 = self.up4(e4)
-        d4 = torch.cat([d4, e3], dim=1)
-        d4 = self.dec4(d4)
-
-        d3 = self.up3(d4)
-        d3 = torch.cat([d3, e2], dim=1)
-        d3 = self.dec3(d3)
-
-        d2 = self.up2(d3)
-        d2 = torch.cat([d2, e1], dim=1)
-        d2 = self.dec2(d2)
-
-        out_main = self.dec1(d2)
-
-        # Multi-scale predictions
-        out_d4 = self.out_d4(d4)
-        out_d3 = self.out_d3(d3)
-        out_d2 = self.out_d2(d2)
-
-        if self.use_cross_attention:
-            out_main = self.cross_attn(out_main)
-
-        return out_main, out_d2, out_d3, out_d4
 
 
-    def criterion1(self, preds, target):
-        """
-        preds: tuple of (out_main, out_d2, out_d3, out_d4)
-        target: [B, C, H, W] ground truth
-        """
 
-        if self.predict_scalars:
-            losses = self.criterion2(preds,target)
-            return losses
-
-        out_main, out_d2, out_d3, out_d4 = preds
-        all_loss = {}
-
-        # Downsample target to match each prediction
-        if self.err_L1>0:
-            loss_main = F.l1_loss(out_main, target)
-            all_loss['L1_0']=self.err_L1*loss_main
-        if self.err_Multi>0:
-            t_d2 = F.interpolate(target, size=out_d2.shape[-2:], mode="bilinear", align_corners=False)
-            t_d3 = F.interpolate(target, size=out_d3.shape[-2:], mode="bilinear", align_corners=False)
-            t_d4 = F.interpolate(target, size=out_d4.shape[-2:], mode="bilinear", align_corners=False)
-
-            loss_d2   = F.l1_loss(out_d2, t_d2)
-            loss_d3   = F.l1_loss(out_d3, t_d3)
-            loss_d4   = F.l1_loss(out_d4, t_d4)
-            loss_multi = self.err_Multi*(loss_d2+loss_d3+loss_d4)
-            all_loss['L1_Multi'] = loss_multi
-
-        # Weighted sum (more weight on full-res output)
-        if self.err_SSIM > 0:
-            ssim_t  = ssim_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-            ssim_e  = ssim_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            ssim_b  = ssim_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            lambda_ssim = self.err_SSIM*(ssim_e+ssim_b+ssim_t)/3
-            all_loss['SSIM']=lambda_ssim
-        if self.err_Grad > 0:
-            grad_t  = gradient_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-            grad_e  = gradient_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            grad_b  = gradient_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            lambda_grad = self.err_Grad*(grad_e+grad_b+grad_t)/3
-            all_loss['Grad']=lambda_grad
-        if self.err_Pear > 0:
-            pear_t  = pearson_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-            pear_e  = pearson_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            pear_b  = pearson_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            lambda_pear = self.err_Pear*(pear_e+pear_b+pear_t)/3
-            all_loss['Pear']=lambda_pear
-        if self.err_Power > 0:
-            lambda_power = self.err_Power*power_spectra_crit(out_main, target)
-            all_loss['Power'] = lambda_power
-        if self.err_Cross > 0:
-            lambda_cross = self.err_Cross*cross_spectra_crit(out_main, target)
-            all_loss['Cross'] = lambda_cross
-        if self.err_Bisp > 0:
-            lambda_bisp = self.err_Bisp*bispectrum_crit(out_main,target)
-            all_loss['Bisp'] = lambda_bisp
-
-        return all_loss
-
-    def criterion2(self,preds,target):
+    def criterion1(self,preds,target):
         return {'mse':F.mse_loss(preds, target)}
     def criterion(self, preds, target):
         losses = self.criterion1(preds,target)

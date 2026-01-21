@@ -21,7 +21,7 @@ import torch_power
 
 
 idd = 3300
-what = "3110 with uncertainty quantification"
+what = "3110 with uncertainty quantification; gaussian head"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -31,6 +31,9 @@ fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
 fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
 fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
+#fname_train = "p79d_subsets_S512_N3_xyz_Athena_T_odd.h5"
+#fname_valid = "p79d_subsets_S512_N3_xyz_Athena_T_even.h5"
+
 #fname_train = "p79d_subsets_S512_N3_xyz_T_even.h5"
 #fname_valid = "p79d_subsets_S512_N3_xyz_T_odd.h5"
 #ntrain = 2000
@@ -39,14 +42,14 @@ fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 ntrain = 10000
 #nvalid=3
 #ntrain = 10
-nvalid=30
+nvalid=300
 ntest = 5000
 downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 1e6
-epochs = 10
-lr = 0.5e-3
+epochs = 50
+lr = 1e-4
 #lr = 1e-4
 batch_size=64
 lr_schedule=[1000]
@@ -81,6 +84,194 @@ def train(model,all_data):
 
 import torch
 import torch.nn.functional as F
+
+def build_ensemble(K):
+    """
+    Build a list of K independently initialized models.
+    """
+    return [thisnet() for _ in range(K)]
+def train_single_model(model, all_data, seed_offset=0):
+    """
+    Thin wrapper that calls your existing trainer with a different seed.
+    """
+    global idd  # if you use idd for bookkeeping/logging
+    base_seed = 8675309
+    seed = base_seed + seed_offset
+
+    trained_model = trainer(
+        model,
+        all_data,
+        epochs=epochs,
+        lr=lr,
+        batch_size=batch_size,
+        weight_decay=weight_decay,
+        lr_schedule=lr_schedule,
+        seed=seed,
+    )
+    return trained_model
+
+def train_ensemble(ensemble, all_data):
+    """
+    Train each member of the ensemble with a different seed.
+    Returns the list of trained models.
+    """
+    trained = []
+    for j, model in enumerate(ensemble):
+        print(f"=== Training ensemble member {j+1}/{len(ensemble)} ===")
+        trained_model = train_single_model(model, all_data, seed_offset=j)
+        trained.append(trained_model)
+    return trained
+
+def ensemble_predict(ensemble, x):
+    """
+    ensemble: list of trained main_net models
+    x: [B,1,H,W] or [B,H,W]
+
+    Returns:
+        mu_mean:    [B,1] ensemble mean
+        sigma_tot:  [B,1] total predictive std (aleatoric + epistemic)
+        aleatoric:  [B,1]
+        epistemic:  [B,1]
+    """
+    mus = []
+    sigma2s = []
+
+    for model in ensemble:
+        mu_j, sigma_j = model.predict_ms_and_sigma(x)  # [B,1] each
+        mus.append(mu_j)
+        sigma2s.append(sigma_j ** 2)
+
+    mu_stack    = torch.stack(mus, dim=0)      # [K,B,1]
+    sigma2_stack = torch.stack(sigma2s, dim=0) # [K,B,1]
+
+    mu_mean   = mu_stack.mean(dim=0)  # [B,1]
+    aleatoric = sigma2_stack.mean(dim=0)
+    epistemic = mu_stack.var(dim=0, unbiased=False)
+    var_total = aleatoric + epistemic
+    sigma_tot = var_total.sqrt()
+
+    return mu_mean, sigma_tot, aleatoric, epistemic
+
+import math
+import torch
+
+def conformal_quantile(scores, alpha=0.9):
+    """
+    Split conformal quantile for symmetric intervals.
+    We want q such that P(score <= q) ≈ alpha.
+
+    scores: tensor of shape [N] or [N,1], scores >= 0
+    """
+    scores = scores.view(-1)
+    N = scores.numel()
+    scores_sorted, _ = torch.sort(scores)
+
+    # Correct index for alpha-quantile with conformal correction:
+    # k = ceil(alpha*(N+1)) - 1  (0-indexed)
+    k = math.ceil(alpha * (N + 1)) - 1
+    k = max(0, min(k, N - 1))
+    return scores_sorted[k]
+
+from torch.utils.data import DataLoader
+
+def compute_conformal_scale(ensemble, all_data, alpha=0.9, batch_size=128):
+    """
+    Uses all_data['valid'] as a calibration set to estimate q_alpha.
+
+    ensemble: list of trained models
+    all_data: your data dict from load_data()
+    alpha: desired marginal coverage (e.g. 0.9 or 0.95)
+
+    Returns:
+        q_alpha (float tensor scalar)
+    """
+    # Build calibration dataset/loader (no random shifts, rotation_prob=0)
+    ds_calib = SphericalDataset(
+        all_data['valid'],
+        all_data['quantities']['valid'],
+        rotation_prob=0.0,
+        rand=False,
+    )
+    calib_loader = DataLoader(ds_calib, batch_size=batch_size, shuffle=False, drop_last=False)
+
+    device = next(ensemble[0].parameters()).device
+    all_scores = []
+
+    for xb, yb in calib_loader:
+        xb = xb.to(device)
+        yb = yb.to(device)  # [B,1]
+
+        mu_mean, sigma_tot, _, _ = ensemble_predict(ensemble, xb)  # [B,1]
+        # Avoid divide-by-zero
+        sigma_tot = sigma_tot.clamp(min=1e-6)
+
+        # Nonconformity score s = |y - mu| / sigma_tot
+        s = torch.abs(yb - mu_mean) / sigma_tot
+        all_scores.append(s.detach().cpu())
+
+    all_scores = torch.cat(all_scores, dim=0)  # [N,1]
+    q_alpha = conformal_quantile(all_scores, alpha=alpha)
+    return q_alpha
+
+def predictive_interval_conformal(ensemble, x, q_alpha):
+    """
+    ensemble: list of trained models
+    x: [B,1,H,W] or [B,H,W]
+    q_alpha: scalar tensor from compute_conformal_scale (for chosen alpha)
+
+    Returns:
+        mu_mean: [B,1]
+        L:       [B,1] lower bound
+        U:       [B,1] upper bound
+        sigma_tot: [B,1]
+        aleatoric: [B,1]
+        epistemic: [B,1]
+    """
+    mu_mean, sigma_tot, aleatoric, epistemic = ensemble_predict(ensemble, x)
+    L = mu_mean - q_alpha * sigma_tot
+    U = mu_mean + q_alpha * sigma_tot
+    return mu_mean, L, U, sigma_tot, aleatoric, epistemic
+
+def get_all_mu_sigma(ensemble, all_data):
+    ds_test = SphericalDataset( all_data['test'], all_data['quantities']['test'], rotation_prob=0.0, rand=False,
+    )
+    test_loader = DataLoader(ds_test, batch_size=128, shuffle=False)
+
+    all_covered = 0
+    all_N = 0
+
+    all_mu=torch.tensor([]).to(device)
+    all_sigma=torch.tensor([]).to(device)
+    for xb, yb in test_loader:
+        mu,sig, alea, epis = ensemble_predict(ensemble, xb)
+        all_mu = torch.cat([all_mu,mu])
+        all_sigma = torch.cat([all_sigma,sig])
+
+    return all_mu, all_sigma
+
+def coverage(ensemble, all_data,quantile):
+    q90 = compute_conformal_scale(ensemble, all_data, alpha=quantile)
+    ds_test = SphericalDataset( all_data['test'], all_data['quantities']['test'], rotation_prob=0.0, rand=False,
+    )
+    test_loader = DataLoader(ds_test, batch_size=128, shuffle=False)
+
+    all_covered = 0
+    all_N = 0
+
+    for xb, yb in test_loader:
+        xb = xb.to(device)
+        yb = yb.to(device)
+        mu, L, U, sig, alea, epis = predictive_interval_conformal(ensemble, xb, q90)
+        covered = ((yb >= L) & (yb <= U)).sum().item()
+        all_covered += covered
+        all_N += yb.numel()
+
+    empirical_cov = all_covered / all_N
+    #print("Empirical 90% coverage:", empirical_cov)
+    return empirical_cov
+
+
+
 
 def downsample_avg(x, M):
     if x.ndim == 2:   # [N, N]
@@ -143,9 +334,10 @@ def trainer(
     grad_clip=1.0,
     warmup_frac=0.05,
     lr_schedule=[900],
-    plot_path=None
+    plot_path=None,
+    seed = 8675309
 ):
-    set_seed()
+    set_seed(seed=seed)
 
     ds_train = SphericalDataset(all_data['train'],all_data['quantities']['train'], rotation_prob=model.rotation_prob, rand=True)
     ds_val   = SphericalDataset(all_data['valid'],all_data['quantities']['valid'], rotation_prob=model.rotation_prob)
@@ -624,9 +816,15 @@ class main_net(nn.Module):
         if use_cross_attention:
             self.cross_attn = CrossAttention(out_channels, num_heads=attn_heads)
 
+        import math
         if self.predict_scalars:
             in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
-            self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.Linear(in_dim, self.n_scalars))
+            #self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.ReLU(),nn.Linear(in_dim, self.n_scalars))
+            self.fc_out = nn.Linear(in_dim, self.n_scalars)
+            nn.init.xavier_uniform_(self.fc_out.weight)
+            nn.init.zeros_(self.fc_out.bias)
+            with torch.no_grad():
+                self.fc_out.bias[1].fill_(math.log(0.3**2))
 
 
         self.register_buffer("train_curve", torch.zeros(epochs))
@@ -764,10 +962,37 @@ class main_net(nn.Module):
         y         = target[:, 0:1]
 
         nll = gaussian_nll(mu, log_sigma, y)
-        return {'nll': nll}
+        mse = F.mse_loss(mu, y)
+        return {'nll': nll, 'mse':mse}
 
     def criterion(self, preds, target):
         losses = self.criterion1(preds,target)
 
         return sum(losses.values())
+    def predict_ms_and_sigma(self, x, return_log_sigma=False):
+        """
+        Convenience wrapper for scalar mode with Gaussian head.
+        x: [B, 1, H, W] or [B, H, W]
+        Returns:
+            mu:          [B, 1]
+            sigma:       [B, 1]  (unless return_log_sigma=True)
+            (optionally log_sigma: [B,1])
+        """
+        self.eval()
+        device = next(self.parameters()).device
+        x = x.to(device)
+
+        with torch.no_grad():
+            preds = self(x)  # [B,2] in scalar mode (mu, log_sigma)
+
+        mu        = preds[:, 0:1]
+        log_sigma = preds[:, 1:2]
+
+        if return_log_sigma:
+            return mu, log_sigma
+
+        sigma = torch.exp(log_sigma)
+        return mu, sigma
+
+
 

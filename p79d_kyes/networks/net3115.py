@@ -20,26 +20,27 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3112
-what = "3110 with Athena suite"
+idd = 3115
+what = "3110 not3 vs 3"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
 fname_train = "p79d_subsets_S512_N5_xyz__down_64T_first.h5"
 fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
 
-fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
-fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
+#fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
+#fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
-fname_train = "p79d_subsets_S128_N1_xyz_suite7b_first.h5"
-fname_valid = "p79d_subsets_S128_N1_xyz_suite7b_second.h5"
+#fname_train = "p79d_subsets_S512_N3_xyz_T_even.h5"
+#fname_valid = "p79d_subsets_S512_N3_xyz_T_odd.h5"
 
-
+fname_train = "p79d_subsets_S512_N3_xyz_T_1245678.h5"
+fname_valid = "p79d_subsets_S512_N3_xyz_T_3.h5"
 
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 14000
+ntrain = 10000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -48,7 +49,7 @@ downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 #epochs  = 1e6
-epochs = 50
+epochs = 500
 lr = 0.5e-3
 #lr = 1e-4
 batch_size=64
@@ -159,7 +160,7 @@ def trainer(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * max(1, len(train_loader))
-    print("Total Steps", total_steps, "ntrain", min(ntrain,len(all_data['train'])), "epoch", epochs, "down", downsample)
+    print("Total Steps", total_steps, "ntrain", ntrain, "epoch", epochs, "down", downsample)
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps

@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 4006
-what = "4005 with power spectrum logic"
+idd = 4005
+what = "4004 with simplified bottleneck logic"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -69,7 +69,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(img_size=downsample,base_channels=32,fc_hidden=2048 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)#, dropout_1=0.3, dropout_2=0.3, dropout_3=0.3)
+    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)#, dropout_1=0.3, dropout_2=0.3, dropout_3=0.3)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -118,11 +118,10 @@ class SphericalDataset(Dataset):
         dy = torch.randint(0, H, (1,)).item()
         dx = torch.randint(0, W, (1,)).item()
         theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
-        #theset[0] = torch.log(theset[0])
+        theset[0] = torch.log(theset[0])
         ms = self.quan['Ms_act'][idx]
         ma = self.quan['Ma_act'][idx]
-        target = torch.log(torch.tensor([ms], dtype=torch.float32).to(device))
-        return theset[0:1].to(device), target
+        return theset[0:3].to(device), torch.log(torch.tensor([ms], dtype=torch.float32).to(device))
 
 # ---------------------------
 # Utils
@@ -169,7 +168,7 @@ def trainer(
 
     best_val = float("inf")
     best_state = None
-    load_best = True
+    load_best = False
     patience = 1e6
     bad_epochs = 0
 
@@ -370,97 +369,23 @@ class CrossAttention(nn.Module):
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
 
-# ---------------------------------------------------------
-# 1. Helper: Differentiable Radial Profile (PSD)
-# ---------------------------------------------------------
-class RadialProfile(nn.Module):
-    def __init__(self, size, n_bins=None):
-        super().__init__()
-        H, W = size, size 
-        y, x = np.indices((H, W))
-        center = (H // 2, W // 2)
-        r = np.sqrt((x - center[1])**2 + (y - center[0])**2)
-        
-        # We need the maximum radius (corner) to size the buffer correctly
-        r = r.astype(int)
-        max_r = r.max()
-        
-        # User defined bins (usually up to the edge, not corner)
-        if n_bins is None:
-            n_bins = int(min(H, W) / 2)
-        
-        self.n_bins = n_bins
-        self.r_flat = torch.from_numpy(r.flatten()).long()
-        
-        # Calculate bin counts up to the corner (max_r)
-        bin_count = torch.bincount(self.r_flat, minlength=max_r + 1)
-        
-        # Avoid division by zero
-        bin_count[bin_count == 0] = 1 
-        
-        self.register_buffer('bin_count', bin_count.float())
-        self.register_buffer('indices', self.r_flat)
-        # Save the size needed for the temporary output buffer
-        self.max_r = max_r
-
-    def forward(self, x):
-        # x shape: [B, 1, H, W] or [B, H, W]
-        if x.ndim == 3:
-            x = x.unsqueeze(1)
-        
-        B, C, H, W = x.shape
-        
-        # 1. FFT
-        fft = torch.fft.fft2(x)
-        fft = torch.fft.fftshift(fft)
-        power_spectrum = torch.abs(fft)**2
-        
-        # Collapse channels if C > 1 (safety for the future)
-        if C > 1:
-            power_spectrum = power_spectrum.mean(dim=1)
-        else:
-            power_spectrum = power_spectrum.squeeze(1)
-            
-        # Flatten: [B, H*W]
-        ps_flat = power_spectrum.view(B, -1)
-        
-        # 2. Accumulate
-        # Create output buffer large enough for corners (max_r + 1)
-        output = torch.zeros(B, self.max_r + 1, device=x.device)
-        
-        for b in range(B):
-            output[b].index_add_(0, self.indices, ps_flat[b])
-            
-        # Normalize
-        output = output / self.bin_count
-        
-        # 3. Return
-        # We only return bins 1 to n_bins (ignoring DC component 0, and ignoring corners)
-        # Add epsilon to avoid log(0)
-        return torch.log(output[:, 1:self.n_bins] + 1e-8)
-
-# ---------------------------------------------------------
-# 2. Updated Main Net
 class main_net(nn.Module):
-    def __init__(self, in_channels=1, out_channels=3, base_channels=32,
+    def __init__(self, in_channels=3, out_channels=3, base_channels=32,
                  use_fc_bottleneck=True, fc_hidden=2048, fc_spatial=4, rotation_prob=0,
                  use_cross_attention=False, attn_heads=1, epochs=100, pool_type='max', 
-                 suffix='', dropout_1=0.0, dropout_2=0.0, dropout_3=0.0, 
-                 predict_scalars=True, n_scalars=1, img_size=64):
+                 suffix='', dropout_1=0.0, dropout_2=0.0, dropout_3=0.0, predict_scalars=True, n_scalars=1):
         super().__init__()
         
-        self.predict_log=True
-        self.predict_scalars=True
-        self.n_scalars=1
         self.use_fc_bottleneck = use_fc_bottleneck
         self.fc_spatial = fc_spatial
-        
-        # --- Spatial Encoder (CNN) ---
+        self.dropout_2 = dropout_2
+        self.predict_scalars = predict_scalars
+        self.n_scalars = n_scalars
+
+        # --- Encoder (kept largely the same) ---
+        # Note: Added GeLU to the ResidualBlockSE internals if you update that class too, 
+        # but here we focus on the main flow.
         d1, d2, d3, d4 = 2, 4, 8, 16
         self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1, dilation=d1)
         self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1, dilation=d2)
@@ -468,88 +393,70 @@ class main_net(nn.Module):
         self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1, dilation=d4)
         self.pool = nn.MaxPool2d(2)
 
-        # Calculate CNN output size
-        # base=32 -> enc4=256 channels.
-        # adaptive_pool to (fc_spatial, fc_spatial) -> 256 * 4 * 4
-        cnn_raw_dim = base_channels * 8 * fc_spatial * fc_spatial 
+        # --- Simplified Bottleneck / Regressor ---
+        # We calculate the flattened size entering the linear layers
+        # Assuming input is [B, C, H, W], after 3 pools (enc1->pool->enc2->pool->enc3->pool->enc4)
+        # However, we use AdaptiveAvgPool at the end, so the spatial dim becomes fixed to (fc_spatial, fc_spatial).
         
-        # FIX 1: CNN Bottleneck
-        # Compress huge spatial vector down to 128 BEFORE fusion
-        self.cnn_bottleneck = nn.Sequential(
-            nn.Linear(cnn_raw_dim, 128),
-            nn.LayerNorm(128),  # LayerNorm is often better for regression stability
-            nn.GELU()
-        )
-
-        # --- Spectral Encoder (PSD) ---
-        self.psd_calculator = RadialProfile(img_size)
-        psd_input_dim = self.psd_calculator.n_bins - 1
+        feature_dim = base_channels * 8 * fc_spatial * fc_spatial
         
-        # FIX 2: Better PSD Processing
-        self.psd_mlp = nn.Sequential(
-            nn.LayerNorm(psd_input_dim), # Normalize each sample independently
-            nn.Linear(psd_input_dim, 128),
-            nn.GELU(),
-            nn.Linear(128, 128), # Project to same size as CNN features
-            nn.LayerNorm(128),
-            nn.GELU()
-        )
-
-        # --- Fusion & Regression ---
-        # Now we fuse 128 (CNN) + 128 (PSD) = 256
-        total_in_dim = 256 
-
-        self.regressor = nn.Sequential(
-            nn.Linear(total_in_dim, fc_hidden),
-            nn.GELU(),
-            nn.Dropout(p=dropout_2),
-            nn.Linear(fc_hidden, fc_hidden // 2),
-            nn.GELU(),
-            nn.Linear(fc_hidden // 2, n_scalars)
-        )
-        
-        # Learnable gate (initialized to small value to start with primarily CNN)
-        self.psd_weight = nn.Parameter(torch.tensor(0.1))
+        if use_fc_bottleneck:
+            self.regressor = nn.Sequential(
+                nn.Flatten(),
+                nn.Linear(feature_dim, fc_hidden),
+                nn.GELU(), # Changed from ReLU
+                nn.Dropout(p=dropout_2),
+                nn.Linear(fc_hidden, fc_hidden // 2),
+                nn.GELU(),
+                nn.Linear(fc_hidden // 2, self.n_scalars)
+            )
+        else:
+            # Simple global average pooling direct to output
+            self.regressor = nn.Sequential(
+                nn.AdaptiveAvgPool2d((1, 1)),
+                nn.Flatten(),
+                nn.Linear(base_channels * 8, self.n_scalars)
+            )
 
         self.register_buffer("train_curve", torch.zeros(epochs))
         self.register_buffer("val_curve", torch.zeros(epochs))
 
     def forward(self, x):
-            # 1. Input Prep
-            x_log = torch.log1p(x)
-            if x_log.ndim == 3:
-                x_log = x_log.unsqueeze(1)
-                x = x.unsqueeze(1)
+        # 1. Log-transform input (Physical Scaling improvement)
+        # This helps the net see faint filaments vs bright cores.
+        # ! done in the data handler.
+        #x = torch.log1p(x)
 
-            # --- Path A: Spatial CNN ---
-            e1 = self.enc1(x_log)
-            e2 = self.enc2(self.pool(e1))
-            e3 = self.enc3(self.pool(e2))
-            e4 = self.enc4(self.pool(e3))
-            
-            # Pull global spatial features
-            z_spatial = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial))
-            z_spatial = z_spatial.reshape(z_spatial.size(0), -1) # flattened for Linear
-            
-            # Compress CNN features to 128
-            z_spatial = self.cnn_bottleneck(z_spatial)
+        if x.ndim == 3:
+            x = x.unsqueeze(1)
 
-            # --- Path B: Spectral PSD ---
-            psd_raw = self.psd_calculator(x_log) 
-            
-            # FIX: Just call the MLP directly once. No loop needed.
-            z_spectral = self.psd_mlp(psd_raw)
+        # 2. Encoder Path
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        e3 = self.enc3(self.pool(e2))
+        e4 = self.enc4(self.pool(e3))
 
-            # --- Path C: Weighted Fusion ---
-            # Concatenate 128 + 128 = 256
-            z_combined = torch.cat([z_spatial, z_spectral * self.psd_weight], dim=1)
-            
-            out = self.regressor(z_combined)
-            return out
+        # 3. Spatial Aggregation
+        # We force the features into a fixed grid size regardless of input image size
+        # This makes the linear layer input size consistent.
+        z = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial))
+        
+        # 4. Regression Head
+        # z is [B, 256, 4, 4] -> Flatten -> MLP -> [B, 1]
+        out = self.regressor(z)
+        
+        return out
 
     def criterion1(self, preds, target):
+        """
+        Calculates MSE between the prediction and the LOG of the Mach number.
+        Target shape expected: [B, 1]
+        """
+        # Ensure target is at least 1e-6 to avoid log(0) errors, though Mach is usually > 0.
         target = torch.clamp(target, min=1e-6)
-        # Assuming model predicts log(M), and target is raw M
+        
+        # Predict in log space: log(M_predicted) vs log(M_actual)
+        # preds is already raw output from the net (assumed to represent log M)
         return {'mse': F.mse_loss(preds, target)}
 
     def criterion(self, preds, target):

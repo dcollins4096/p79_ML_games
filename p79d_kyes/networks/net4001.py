@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3112
-what = "3110 with Athena suite"
+idd = 4001
+what = "3110 with Athena suite and velocity centroid, centroid only"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -31,8 +31,8 @@ fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
 fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
 fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
-fname_train = "p79d_subsets_S128_N1_xyz_suite7b_first.h5"
-fname_valid = "p79d_subsets_S128_N1_xyz_suite7b_second.h5"
+fname_train = "p79d_subsets_S128_N1_xyz_suite7v_first.h5"
+fname_valid = "p79d_subsets_S128_N1_xyz_suite7v_second.h5"
 
 
 
@@ -121,7 +121,7 @@ class SphericalDataset(Dataset):
         theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
         ms = self.quan['Ms_act'][idx]
         ma = self.quan['Ma_act'][idx]
-        return theset[0].to(device), torch.tensor([ms], dtype=torch.float32).to(device)
+        return theset[1:2].to(device), torch.tensor([ms], dtype=torch.float32).to(device)
 
 # ---------------------------
 # Utils
@@ -168,8 +168,8 @@ def trainer(
 
     best_val = float("inf")
     best_state = None
-    load_best = False
-    patience = 1e6
+    load_best = True
+    patience = 25
     bad_epochs = 0
 
     train_curve, val_curve = [], []

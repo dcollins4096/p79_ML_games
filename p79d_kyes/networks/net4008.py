@@ -118,6 +118,8 @@ class SphericalDataset(Dataset):
         dy = torch.randint(0, H, (1,)).item()
         dx = torch.randint(0, W, (1,)).item()
         theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
+        k = torch.randint(0, 4, (1,)).item()
+        theset = torch.rot90(theset, k, dims=[-2, -1])
         #theset[0] = torch.log(theset[0])
         ms = self.quan['Ms_act'][idx]
         ma = self.quan['Ma_act'][idx]

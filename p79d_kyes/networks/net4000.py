@@ -21,38 +21,46 @@ import torch_power
 
 
 idd = 4000
-what = "184 but predict E&B from Q&U"
+what = "3110 with Athena suite and velocity centroid"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
-fname_train = "p79d_subsets_S256_N5_y__down_64THQUEB_first.h5"
-fname_valid = "p79d_subsets_S256_N5_y__down_64THQUEB_second.h5"
-fname_train = "p79d_subsets_S512_N5_y__down_64THQUEB_first.h5"
-fname_valid = "p79d_subsets_S512_N5_y__down_64THQUEB_second.h5"
+fname_train = "p79d_subsets_S512_N5_xyz__down_64T_first.h5"
+fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
+
+fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
+fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
+
+fname_train = "p79d_subsets_S128_N1_xyz_suite7v_first.h5"
+fname_valid = "p79d_subsets_S128_N1_xyz_suite7v_second.h5"
+
+
+
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 10000
+ntrain = 14000
 #nvalid=3
 #ntrain = 10
 nvalid=30
+ntest = 5000
 downsample = 64
 #device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 device = "cuda" if torch.cuda.is_available() else "cpu"
-#epochs  = 20
+#epochs  = 1e6
 epochs = 50
-lr = 1e-3
+lr = 0.5e-3
 #lr = 1e-4
 batch_size=64
-lr_schedule=[100]
-weight_decay = 1e-3
+lr_schedule=[1000]
+weight_decay = 1e-2
 fc_bottleneck=True
 def load_data():
 
     print('read the data')
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
     valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
-    all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'], 'quantities':{}}
+    all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'][:ntest], 'quantities':{}}
     all_data['quantities']['train']=train['quantities']['train']
     all_data['quantities']['valid']=valid['quantities']['valid']
     all_data['quantities']['test']=valid['quantities']['test']
@@ -61,7 +69,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=2, use_cross_attention=False, attn_heads=1)
+    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)#, dropout_1=0.3, dropout_2=0.3, dropout_3=0.3)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -94,24 +102,26 @@ def downsample_avg(x, M):
 import torchvision.transforms.functional as TF
 import random
 class SphericalDataset(Dataset):
-    def __init__(self, all_data, rotation_prob = 0.0):
+    def __init__(self, all_data, quan, rotation_prob = 0.0, rand=False):
         self.rotation_prob = rotation_prob
+        self.quan=quan
         if downsample:
             self.all_data=downsample_avg(all_data,downsample)
         else:
             self.all_data=all_data
+        self.rand=rand
     def __len__(self):
         return self.all_data.size(0)
 
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
-        theset = self.all_data[idx]
-        if random.uniform(0,1) < self.rotation_prob:
-            angle = random.uniform(-90,90)
-            theset = TF.rotate(theset,angle)
-
-        #return theset[2:4].to(device), theset[4:6].to(device)
-        return theset[0:2].to(device), theset[4:6].to(device)
+        H, W = self.all_data[0][0].shape
+        dy = torch.randint(0, H, (1,)).item()
+        dx = torch.randint(0, W, (1,)).item()
+        theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
+        ms = self.quan['Ms_act'][idx]
+        ma = self.quan['Ma_act'][idx]
+        return theset[0:2].to(device), torch.tensor([ms], dtype=torch.float32).to(device)
 
 # ---------------------------
 # Utils
@@ -140,8 +150,8 @@ def trainer(
 ):
     set_seed()
 
-    ds_train = SphericalDataset(all_data['train'], rotation_prob=model.rotation_prob)
-    ds_val   = SphericalDataset(all_data['valid'], rotation_prob=model.rotation_prob)
+    ds_train = SphericalDataset(all_data['train'],all_data['quantities']['train'], rotation_prob=model.rotation_prob, rand=True)
+    ds_val   = SphericalDataset(all_data['valid'],all_data['quantities']['valid'], rotation_prob=model.rotation_prob)
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader   = DataLoader(ds_val,   batch_size=max(64, batch_size), shuffle=False, drop_last=False)
 
@@ -149,7 +159,7 @@ def trainer(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * max(1, len(train_loader))
-    print("Total Steps", total_steps)
+    print("Total Steps", total_steps, "ntrain", min(ntrain,len(all_data['train'])), "epoch", epochs, "down", downsample)
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
@@ -158,7 +168,8 @@ def trainer(
 
     best_val = float("inf")
     best_state = None
-    patience = 25
+    load_best = False
+    patience = 1e6
     bad_epochs = 0
 
     train_curve, val_curve = [], []
@@ -171,7 +182,7 @@ def trainer(
 
 
     for epoch in range(1, epochs+1):
-        if epoch > 5 and save_err_Cross>0:
+        if epoch > 50 and save_err_Cross>0:
             model.err_Cross = save_err_Cross
         model.train()
         if verbose:
@@ -180,7 +191,7 @@ def trainer(
         import tqdm
         for xb, yb in tqdm.tqdm(train_loader):
             xb = xb.to(device)
-            yb = yb.to(device)
+            #yb = yb.to(device)
 
             optimizer.zero_grad(set_to_none=True)
             if verbose:
@@ -215,7 +226,7 @@ def trainer(
             vtotal = 0.0
             for xb, yb in val_loader:
                 xb = xb.to(device)
-                yb = yb.to(device)
+                #yb = yb.to(device)
                 preds = model(xb)
                 #vloss = model.criterion(preds, yb[:,0:1,:,:])
                 vloss = model.criterion(preds, yb)
@@ -262,15 +273,14 @@ def trainer(
         if nowdate.day - etad.day != 0:
             print('tomorrow')
 
-        if bad_epochs >= patience and False:
+        if bad_epochs >= patience:
             print(f"Early stopping at epoch {epoch}. Best val {best_val:.4f}.")
-            print('disabled')
-            #break
+            break
 
-    return model
     # restore best
-    #if best_state is not None:
-    #    model.load_state_dict(best_state)
+    if best_state is not None and load_best:
+        model.load_state_dict(best_state)
+    return model
 
     # quick plot (optional)
 
@@ -292,8 +302,7 @@ def power_spectrum_delta(guess,target):
 def power_spectra_crit(guess,target):
     err_T = power_spectrum_delta(guess[:,0:1,:,:], target[:,0:1,:,:])
     err_E = power_spectrum_delta(guess[:,1:2,:,:], target[:,1:2,:,:])
-    #err_B = power_spectrum_delta(guess[:,2:3,:,:], target[:,2:3,:,:])
-    err_B=0
+    err_B = power_spectrum_delta(guess[:,2:3,:,:], target[:,2:3,:,:])
     return err_T+err_E+err_B
 
 def cross_spectrum_delta(guess,target):
@@ -318,8 +327,7 @@ def cross_spectrum_cosine(guess, target):
 def cross_spectra_crit(guess,target):
     err_T = cross_spectrum_cosine(guess[:,0:1,:,:], target[:,0:1,:,:])
     err_E = cross_spectrum_cosine(guess[:,1:2,:,:], target[:,1:2,:,:])
-    #err_B = cross_spectrum_cosine(guess[:,2:3,:,:], target[:,2:3,:,:])
-    err_B=0
+    err_B = cross_spectrum_cosine(guess[:,2:3,:,:], target[:,2:3,:,:])
     return err_T+err_E+err_B
 
 import bispectrum
@@ -348,12 +356,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ResidualBlockSE(nn.Module):
-    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0):
+    def __init__(self, in_channels, out_channels, reduction=16, pool_type="avg", dropout_p=0.0, dilation=1):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        padding=dilation
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=padding, dilation=dilation)
         self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        #self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=padding, dilation=dilation)
+        #self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.dropout = nn.Dropout2d(p=dropout_p) 
 
@@ -389,7 +398,7 @@ class ResidualBlockSE(nn.Module):
         identity = x
         out = F.relu(self.bn1(self.conv1(x)))
         out = self.dropout(out)
-        out = self.bn2(self.conv2(out))
+        #out = self.bn2(self.conv2(out))
 
         # --- SE attention pooling ---
         if self.pool_type == "avg":
@@ -526,9 +535,9 @@ def pearson_loss(pred, target, eps=1e-8):
 class main_net(nn.Module):
     def __init__(self, in_channels=2, out_channels=3, base_channels=32,
                  use_fc_bottleneck=True, fc_hidden=512, fc_spatial=4, rotation_prob=0,
-                 use_cross_attention=False, attn_heads=1, epochs=epochs, pool_type='max', 
+                 use_cross_attention=True, attn_heads=1, epochs=epochs, pool_type='max', 
                  err_L1=1, err_Multi=1,err_Pear=1,err_SSIM=1,err_Grad=1,err_Power=1,err_Bisp=0,err_Cross=1,
-                 suffix='', dropout_1=0, dropout_2=0, dropout_3=0):
+                 suffix='', dropout_1=0, dropout_2=0, dropout_3=0, predict_scalars=True, n_scalars=1):
         super().__init__()
         arg_dict = locals()
         self.use_fc_bottleneck = use_fc_bottleneck
@@ -544,6 +553,9 @@ class main_net(nn.Module):
         self.err_Bisp=err_Bisp
         self.err_Cross=err_Cross
         self.rotation_prob=rotation_prob
+        self.predict_scalars = predict_scalars
+        self.predict_scalars_only = True
+        self.n_scalars = n_scalars
         if 0:
             for arg in arg_dict:
                 if arg in ['self','__class__','arg_dict','text','data']:
@@ -559,11 +571,12 @@ class main_net(nn.Module):
         #self.use_fc_bottleneck = use_fc_bottleneck
         #self.use_cross_attention = use_cross_attention
 
+        d1, d2, d3, d4 = 2, 4, 8,16
         # Encoder
-        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1)
-        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1)
+        self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1, dilation=d1)
+        self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1, dilation=d2)
+        self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1, dilation=d3)
+        self.enc4 = ResidualBlockSE(base_channels*4, base_channels*8, pool_type=pool_type, dropout_p=dropout_1, dilation=d4)
         self.pool = nn.MaxPool2d(2)
 
         # Optional FC bottleneck
@@ -577,9 +590,12 @@ class main_net(nn.Module):
         self.up2 = nn.ConvTranspose2d(base_channels*2, base_channels*2, kernel_size=3, stride=2, padding=1, output_padding=1)
 
         # Decoder with skip connections
-        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, pool_type=pool_type, dropout_p=dropout_3)
-        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, pool_type=pool_type, dropout_p=dropout_3)
-        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, pool_type=pool_type, dropout_p=dropout_3)
+        self.dec4 = ResidualBlockSE(base_channels*8 + base_channels*4, base_channels*4, 
+                                    pool_type=pool_type, dropout_p=dropout_3, dilation=d4)
+        self.dec3 = ResidualBlockSE(base_channels*4 + base_channels*2, base_channels*2, 
+                                    pool_type=pool_type, dropout_p=dropout_3, dilation = d3)
+        self.dec2 = ResidualBlockSE(base_channels*2 + base_channels, base_channels, 
+                                    pool_type=pool_type, dropout_p=dropout_3, dilation = d2)
         self.dec1 = nn.Conv2d(base_channels, out_channels, 3, padding=1)
 
         # --- Multi-scale output heads ---
@@ -590,6 +606,11 @@ class main_net(nn.Module):
         # Optional cross-attention
         if use_cross_attention:
             self.cross_attn = CrossAttention(out_channels, num_heads=attn_heads)
+
+        if self.predict_scalars:
+            in_dim = fc_hidden if use_fc_bottleneck else base_channels*8
+            self.fc_out = nn.Sequential(nn.Linear(in_dim,in_dim),nn.Linear(in_dim, self.n_scalars))
+
 
         self.register_buffer("train_curve", torch.zeros(epochs))
         self.register_buffer("val_curve", torch.zeros(epochs))
@@ -616,6 +637,17 @@ class main_net(nn.Module):
             z = F.dropout(z, p=self.dropout_2, training=self.training)
             e4 = F.interpolate(z.view(B, C, self.fc_spatial, self.fc_spatial),
                                size=(H, W), mode='bilinear', align_corners=False)
+            feat = F.relu(self.fc1(
+                F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial)).view(B, -1)
+            ))
+        else:
+            # no bottleneck: global pool + flatten
+            B, C, H, W = e4.shape
+            feat = F.adaptive_avg_pool2d(e4, 1).view(B, -1)
+
+        if self.predict_scalars:
+            # Return [B, n_scalars] instead of images
+            return self.fc_out(feat)
 
         # Decoder
         d4 = self.up4(e4)
@@ -648,6 +680,11 @@ class main_net(nn.Module):
         preds: tuple of (out_main, out_d2, out_d3, out_d4)
         target: [B, C, H, W] ground truth
         """
+
+        if self.predict_scalars:
+            losses = self.criterion2(preds,target)
+            return losses
+
         out_main, out_d2, out_d3, out_d4 = preds
         all_loss = {}
 
@@ -670,22 +707,19 @@ class main_net(nn.Module):
         if self.err_SSIM > 0:
             ssim_t  = ssim_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
             ssim_e  = ssim_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            #ssim_b  = ssim_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            ssim_b=0
+            ssim_b  = ssim_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
             lambda_ssim = self.err_SSIM*(ssim_e+ssim_b+ssim_t)/3
             all_loss['SSIM']=lambda_ssim
         if self.err_Grad > 0:
             grad_t  = gradient_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
             grad_e  = gradient_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            #grad_b  = gradient_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            grad_b=0
+            grad_b  = gradient_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
             lambda_grad = self.err_Grad*(grad_e+grad_b+grad_t)/3
             all_loss['Grad']=lambda_grad
         if self.err_Pear > 0:
             pear_t  = pearson_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
             pear_e  = pearson_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            #pear_b  = pearson_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            pear_b=0
+            pear_b  = pearson_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
             lambda_pear = self.err_Pear*(pear_e+pear_b+pear_t)/3
             all_loss['Pear']=lambda_pear
         if self.err_Power > 0:
@@ -700,6 +734,8 @@ class main_net(nn.Module):
 
         return all_loss
 
+    def criterion2(self,preds,target):
+        return {'mse':F.mse_loss(preds, target)}
     def criterion(self, preds, target):
         losses = self.criterion1(preds,target)
 

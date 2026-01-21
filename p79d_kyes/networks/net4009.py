@@ -20,8 +20,8 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 4006
-what = "4005 with power spectrum logic"
+idd = 4009
+what = "4008 with new FFT head"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
@@ -51,9 +51,9 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 epochs = 30
 lr = 0.5e-3
 #lr = 1e-4
-batch_size=64
+batch_size=16
 lr_schedule=[1000]
-weight_decay = 1e-2
+weight_decay = 5e-2
 fc_bottleneck=True
 def load_data():
 
@@ -69,7 +69,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(img_size=downsample,base_channels=32,fc_hidden=2048 , fc_spatial=8, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)#, dropout_1=0.3, dropout_2=0.3, dropout_3=0.3)
+    model = main_net(img_size=downsample,base_channels=16,fc_hidden=512 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)#, dropout_1=0.3, dropout_2=0.3, dropout_3=0.3)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -122,7 +122,7 @@ class SphericalDataset(Dataset):
         ms = self.quan['Ms_act'][idx]
         ma = self.quan['Ma_act'][idx]
         target = torch.log(torch.tensor([ms], dtype=torch.float32).to(device))
-        return theset[0:1].to(device), target
+        return theset[0:3].to(device), target
 
 # ---------------------------
 # Utils
@@ -161,15 +161,22 @@ def trainer(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * max(1, len(train_loader))
     print("Total Steps", total_steps, "ntrain", min(ntrain,len(all_data['train'])), "epoch", epochs, "down", downsample)
-    scheduler = optim.lr_scheduler.MultiStepLR(
-        optimizer,
-        milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
-        gamma=0.1             # multiply by gamma each time
-    )
+    if 0:
+        scheduler = optim.lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
+            gamma=0.1             # multiply by gamma each time
+        )
+    if 1:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, 
+            T_max=epochs, 
+            eta_min=1e-7
+        )
 
     best_val = float("inf")
     best_state = None
-    load_best = True
+    load_best = False
     patience = 1e6
     bad_epochs = 0
 
@@ -274,6 +281,7 @@ def trainer(
 
     # restore best
     if best_state is not None and load_best:
+        print(f"Load Best. Best val {best_val:.4f}.")
         model.load_state_dict(best_state)
     return model
 
@@ -374,83 +382,80 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-
-# ---------------------------------------------------------
-# 1. Helper: Differentiable Radial Profile (PSD)
-# ---------------------------------------------------------
-class RadialProfile(nn.Module):
-    def __init__(self, size, n_bins=None):
+class FFTCNNEncoder(nn.Module):
+    def __init__(self, in_channels=3, out_dim=1024, dropout_p=0.4):
         super().__init__()
-        H, W = size, size 
-        y, x = np.indices((H, W))
-        center = (H // 2, W // 2)
-        r = np.sqrt((x - center[1])**2 + (y - center[0])**2)
+        self.input_channels = in_channels * 3 # Mag, Sin, Cos
         
-        # We need the maximum radius (corner) to size the buffer correctly
-        r = r.astype(int)
-        max_r = r.max()
+        # 1. Frequency Feature Extractor
+        self.feature_extractor = nn.Sequential(
+            nn.BatchNorm2d(self.input_channels),
+            # 1x1 Conv acts as a "learnable transform" across physics fields
+            # It prevents the network from over-focusing on just one field early on
+            nn.Conv2d(self.input_channels, 64, kernel_size=1),
+            nn.GELU(),
+            
+            # Reduce spatial complexity early to prevent coordinate memorization
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1), # 64 -> 32
+            nn.BatchNorm2d(128),
+            nn.GELU(),
+            
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1), # 32 -> 16
+            nn.BatchNorm2d(256),
+            nn.GELU(),
+            
+            # Global pooling forces the model to look at the 'presence' of scales, 
+            # not their specific (u,v) coordinates.
+            nn.AdaptiveAvgPool2d((2, 2)) 
+        )
         
-        # User defined bins (usually up to the edge, not corner)
-        if n_bins is None:
-            n_bins = int(min(H, W) / 2)
-        
-        self.n_bins = n_bins
-        self.r_flat = torch.from_numpy(r.flatten()).long()
-        
-        # Calculate bin counts up to the corner (max_r)
-        bin_count = torch.bincount(self.r_flat, minlength=max_r + 1)
-        
-        # Avoid division by zero
-        bin_count[bin_count == 0] = 1 
-        
-        self.register_buffer('bin_count', bin_count.float())
-        self.register_buffer('indices', self.r_flat)
-        # Save the size needed for the temporary output buffer
-        self.max_r = max_r
+        self.bottleneck = nn.Sequential(
+            nn.Linear(256 * 2 * 2, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.GELU(),
+            nn.Dropout(dropout_p)
+        )
 
     def forward(self, x):
-        # x shape: [B, 1, H, W] or [B, H, W]
-        if x.ndim == 3:
-            x = x.unsqueeze(1)
-        
-        B, C, H, W = x.shape
-        
         # 1. FFT
-        fft = torch.fft.fft2(x)
-        fft = torch.fft.fftshift(fft)
-        power_spectrum = torch.abs(fft)**2
+        ffted = torch.fft.fft2(x, dim=(-2, -1))
+        ffted = torch.fft.fftshift(ffted, dim=(-2, -1))
         
-        # Collapse channels if C > 1 (safety for the future)
-        if C > 1:
-            power_spectrum = power_spectrum.mean(dim=1)
-        else:
-            power_spectrum = power_spectrum.squeeze(1)
-            
-        # Flatten: [B, H*W]
-        ps_flat = power_spectrum.view(B, -1)
+        # 2. Magnitude & Phase
+        mag = torch.abs(ffted)
+        phase = torch.angle(ffted)
         
-        # 2. Accumulate
-        # Create output buffer large enough for corners (max_r + 1)
-        output = torch.zeros(B, self.max_r + 1, device=x.device)
+        # 3. Apply Circular Low-Pass Mask (Physics constraint)
+        # Keeps only the inertial range, cuts off high-frequency noise
+        B, C, H, W = mag.shape
+        y_grid, x_grid = torch.meshgrid(
+            torch.linspace(-1, 1, H, device=x.device), 
+            torch.linspace(-1, 1, W, device=x.device), 
+            indexing='ij'
+        )
+        dist = torch.sqrt(x_grid**2 + y_grid**2)
+        mask = (dist < 1.0).float().unsqueeze(0).unsqueeze(0) # Keep center 70%
         
-        for b in range(B):
-            output[b].index_add_(0, self.indices, ps_flat[b])
-            
-        # Normalize
-        output = output / self.bin_count
+        mag = mag * mask
+        # Zero out DC component
+        mag[:, :, H//2, W//2] = 0
+        mag_log = torch.log1p(mag)
         
-        # 3. Return
-        # We only return bins 1 to n_bins (ignoring DC component 0, and ignoring corners)
-        # Add epsilon to avoid log(0)
-        return torch.log(output[:, 1:self.n_bins] + 1e-8)
-
+        phase_sin = torch.sin(phase) * mask
+        phase_cos = torch.cos(phase) * mask
+        
+        # 4. Process
+        fft_input = torch.cat([mag_log, phase_sin, phase_cos], dim=1)
+        z = self.feature_extractor(fft_input)
+        z = z.view(z.size(0), -1)
+        return self.bottleneck(z)
 # ---------------------------------------------------------
 # 2. Updated Main Net
 class main_net(nn.Module):
-    def __init__(self, in_channels=1, out_channels=3, base_channels=32,
+    def __init__(self, in_channels=3, out_channels=3, base_channels=32,
                  use_fc_bottleneck=True, fc_hidden=2048, fc_spatial=4, rotation_prob=0,
                  use_cross_attention=False, attn_heads=1, epochs=100, pool_type='max', 
-                 suffix='', dropout_1=0.0, dropout_2=0.0, dropout_3=0.0, 
+                 suffix='', dropout_1=0.2, dropout_2=0.2, dropout_3=0.2, 
                  predict_scalars=True, n_scalars=1, img_size=64):
         super().__init__()
         
@@ -461,7 +466,8 @@ class main_net(nn.Module):
         self.fc_spatial = fc_spatial
         
         # --- Spatial Encoder (CNN) ---
-        d1, d2, d3, d4 = 2, 4, 8, 16
+        #d1, d2, d3, d4 = 2, 4, 8, 16
+        d1,d2,d3,d4=1,1,1,1
         self.enc1 = ResidualBlockSE(in_channels, base_channels, pool_type=pool_type, dropout_p=dropout_1, dilation=d1)
         self.enc2 = ResidualBlockSE(base_channels, base_channels*2, pool_type=pool_type, dropout_p=dropout_1, dilation=d2)
         self.enc3 = ResidualBlockSE(base_channels*2, base_channels*4, pool_type=pool_type, dropout_p=dropout_1, dilation=d3)
@@ -471,33 +477,24 @@ class main_net(nn.Module):
         # Calculate CNN output size
         # base=32 -> enc4=256 channels.
         # adaptive_pool to (fc_spatial, fc_spatial) -> 256 * 4 * 4
-        cnn_raw_dim = base_channels * 8 * fc_spatial * fc_spatial 
+        cnn_raw_dim = base_channels * 2 * fc_spatial * fc_spatial 
         
         # FIX 1: CNN Bottleneck
         # Compress huge spatial vector down to 128 BEFORE fusion
+        Nmid = 16
         self.cnn_bottleneck = nn.Sequential(
-            nn.Linear(cnn_raw_dim, 128),
-            nn.LayerNorm(128),  # LayerNorm is often better for regression stability
-            nn.GELU()
-        )
-
-        # --- Spectral Encoder (PSD) ---
-        self.psd_calculator = RadialProfile(img_size)
-        psd_input_dim = self.psd_calculator.n_bins - 1
-        
-        # FIX 2: Better PSD Processing
-        self.psd_mlp = nn.Sequential(
-            nn.LayerNorm(psd_input_dim), # Normalize each sample independently
-            nn.Linear(psd_input_dim, 128),
+            nn.Linear(cnn_raw_dim, Nmid),
+            nn.LayerNorm(Nmid),  # LayerNorm is often better for regression stability
             nn.GELU(),
-            nn.Linear(128, 128), # Project to same size as CNN features
-            nn.LayerNorm(128),
-            nn.GELU()
+            nn.Dropout(0.3)
         )
+        self.fft_encoder = FFTCNNEncoder(in_channels=3, out_dim=Nmid)
+
+
 
         # --- Fusion & Regression ---
         # Now we fuse 128 (CNN) + 128 (PSD) = 256
-        total_in_dim = 256 
+        total_in_dim = 2*Nmid
 
         self.regressor = nn.Sequential(
             nn.Linear(total_in_dim, fc_hidden),
@@ -509,43 +506,43 @@ class main_net(nn.Module):
         )
         
         # Learnable gate (initialized to small value to start with primarily CNN)
-        self.psd_weight = nn.Parameter(torch.tensor(0.1))
+        self.psd_weight = nn.Parameter(torch.tensor(1.0))
 
         self.register_buffer("train_curve", torch.zeros(epochs))
         self.register_buffer("val_curve", torch.zeros(epochs))
 
-    def forward(self, x):
-            # 1. Input Prep
-            x_log = torch.log1p(x)
-            if x_log.ndim == 3:
-                x_log = x_log.unsqueeze(1)
-                x = x.unsqueeze(1)
+    def forward(self, x, cache=False):
+            # x shape: [B, 3, 64, 64]
+            # Ch 0: Density, Ch 1: Velocity Centroid, Ch 2: Velocity Variance
+            
+            # 1. Physical Pre-processing (Anti-NaN)
+            x_proc = x.clone()
+            x_proc[:, 0] = torch.log1p(x[:, 0]) # Density
+            # Symmetric Log for Velocity Centroid
+            x_proc[:, 1] = torch.sign(x[:, 1]) * torch.log1p(torch.abs(x[:, 1])) 
+            x_proc[:, 2] = torch.log1p(x[:, 2]) # Variance
 
-            # --- Path A: Spatial CNN ---
-            e1 = self.enc1(x_log)
+            # 2. Path A: Spatial CNN (Use processed data)
+            e1 = self.enc1(x_proc)
             e2 = self.enc2(self.pool(e1))
-            e3 = self.enc3(self.pool(e2))
-            e4 = self.enc4(self.pool(e3))
+            #e3 = self.enc3(self.pool(e2))
+            #e4 = self.enc4(self.pool(e3))
             
-            # Pull global spatial features
-            z_spatial = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial))
-            z_spatial = z_spatial.reshape(z_spatial.size(0), -1) # flattened for Linear
-            
-            # Compress CNN features to 128
+            z_spatial = F.adaptive_avg_pool2d(e2, (self.fc_spatial, self.fc_spatial))
+            z_spatial = z_spatial.reshape(z_spatial.size(0), -1)
             z_spatial = self.cnn_bottleneck(z_spatial)
 
-            # --- Path B: Spectral PSD ---
-            psd_raw = self.psd_calculator(x_log) 
-            
-            # FIX: Just call the MLP directly once. No loop needed.
-            z_spectral = self.psd_mlp(psd_raw)
+            # 3. Path B: FFT CNN (Use processed data)
+            z_freq = self.fft_encoder(x_proc)
+            #z_freq = self.fft_encoder(x)
 
-            # --- Path C: Weighted Fusion ---
-            # Concatenate 128 + 128 = 256
-            z_combined = torch.cat([z_spatial, z_spectral * self.psd_weight], dim=1)
+            # 4. Path C: Fusion
+            z_combined = torch.cat([z_spatial, z_freq], dim=1)
+            if cache:
+                self.z_freq = z_freq
+                self.z_spatial = z_spatial
             
-            out = self.regressor(z_combined)
-            return out
+            return self.regressor(z_combined)
 
     def criterion1(self, preds, target):
         target = torch.clamp(target, min=1e-6)

@@ -20,26 +20,30 @@ from scipy.ndimage import gaussian_filter
 import torch_power
 
 
-idd = 3112
-what = "3110 with Athena suite"
+idd = 3110
+what = "3110 with suite5"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
 fname_train = "p79d_subsets_S512_N5_xyz__down_64T_first.h5"
 fname_valid = "p79d_subsets_S512_N5_xyz__down_64T_second.h5"
 
-fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
-fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
+#fname_train = "p79d_subsets_S512_N3_xyz_T_first.h5"
+#fname_valid = "p79d_subsets_S512_N3_xyz_T_second.h5"
 
-fname_train = "p79d_subsets_S128_N1_xyz_suite7b_first.h5"
-fname_valid = "p79d_subsets_S128_N1_xyz_suite7b_second.h5"
+fname_train = "p79d_subsets_S256_N1_xyz__down_64suite5_first.h5"
+fname_valid = "p79d_subsets_S256_N1_xyz__down_64suite5_second.h5"
+
+fname_train = "p79d_subsets_S256_N1_xyz__down_64suite5_machLE5_first.h5"
+fname_valid = "p79d_subsets_S256_N1_xyz__down_64suite5_machLE5_second.h5"
 
 
-
+#fname_train = "p79d_subsets_S512_N3_xyz_T_even.h5"
+#fname_valid = "p79d_subsets_S512_N3_xyz_T_odd.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
-ntrain = 14000
+ntrain = 24000
 #nvalid=3
 #ntrain = 10
 nvalid=30
@@ -58,7 +62,9 @@ fc_bottleneck=True
 def load_data():
 
     print('read the data')
+    print(fname_train)
     train= loader.loader(fname_train,ntrain=ntrain, nvalid=nvalid)
+    print(fname_valid)
     valid= loader.loader(fname_valid,ntrain=1, nvalid=nvalid)
     all_data={'train':train['train'],'valid':valid['valid'], 'test':valid['test'][:ntest], 'quantities':{}}
     all_data['quantities']['train']=train['quantities']['train']
@@ -116,9 +122,12 @@ class SphericalDataset(Dataset):
     def __getitem__(self, idx):
         #return self.data[idx], self.targets[idx]
         H, W = self.all_data[0][0].shape
-        dy = torch.randint(0, H, (1,)).item()
-        dx = torch.randint(0, W, (1,)).item()
-        theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
+        if self.rand:
+            dy = torch.randint(0, H, (1,)).item()
+            dx = torch.randint(0, W, (1,)).item()
+            theset= torch.roll(self.all_data[idx], shifts=(dy, dx), dims=(-2, -1))
+        else:
+            theset = self.all_data[idx]
         ms = self.quan['Ms_act'][idx]
         ma = self.quan['Ma_act'][idx]
         return theset[0].to(device), torch.tensor([ms], dtype=torch.float32).to(device)
@@ -159,7 +168,7 @@ def trainer(
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     total_steps = epochs * max(1, len(train_loader))
-    print("Total Steps", total_steps, "ntrain", min(ntrain,len(all_data['train'])), "epoch", epochs, "down", downsample)
+    print("Total Steps", total_steps, "ntrain l", len(all_data['train']), "epoch", epochs, "down", downsample)
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer,
         milestones=lr_schedule, #[100,300,600],  # change after N and N+M steps
@@ -168,8 +177,8 @@ def trainer(
 
     best_val = float("inf")
     best_state = None
-    load_best = False
-    patience = 1e6
+    load_best = True
+    patience = 25
     bad_epochs = 0
 
     train_curve, val_curve = [], []

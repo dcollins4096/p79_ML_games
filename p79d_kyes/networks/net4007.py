@@ -53,7 +53,7 @@ lr = 0.5e-3
 #lr = 1e-4
 batch_size=16
 lr_schedule=[1000]
-weight_decay = 1e-2
+weight_decay = 5e-2
 fc_bottleneck=True
 def load_data():
 
@@ -496,6 +496,7 @@ class FFTCNNEncoder(nn.Module):
         # Zero out DC to focus on fluctuations
         mag[:, :, mag.shape[-2]//2, mag.shape[-1]//2] = 0
         mag_log = torch.log1p(mag)
+        #mag_log = mag
         
         # 4. Process Phase with Sin/Cos encoding
         phase_sin = torch.sin(phase)
@@ -515,7 +516,7 @@ class main_net(nn.Module):
     def __init__(self, in_channels=3, out_channels=3, base_channels=32,
                  use_fc_bottleneck=True, fc_hidden=2048, fc_spatial=4, rotation_prob=0,
                  use_cross_attention=False, attn_heads=1, epochs=100, pool_type='max', 
-                 suffix='', dropout_1=0.0, dropout_2=0.0, dropout_3=0.0, 
+                 suffix='', dropout_1=0.2, dropout_2=0.2, dropout_3=0.2, 
                  predict_scalars=True, n_scalars=1, img_size=64):
         super().__init__()
         
@@ -569,39 +570,33 @@ class main_net(nn.Module):
         self.register_buffer("val_curve", torch.zeros(epochs))
 
     def forward(self, x):
-            # 1. Input Prep
-            x_log = torch.log1p(x)
-            if x_log.ndim == 3:
-                x_log = x_log.unsqueeze(1)
-                x = x.unsqueeze(1)
+            # x shape: [B, 3, 64, 64]
+            # Ch 0: Density, Ch 1: Velocity Centroid, Ch 2: Velocity Variance
+            
+            # 1. Physical Pre-processing (Anti-NaN)
+            x_proc = x.clone()
+            x_proc[:, 0] = torch.log1p(x[:, 0]) # Density
+            # Symmetric Log for Velocity Centroid
+            x_proc[:, 1] = torch.sign(x[:, 1]) * torch.log1p(torch.abs(x[:, 1])) 
+            x_proc[:, 2] = torch.log1p(x[:, 2]) # Variance
 
-            # --- Path A: Spatial CNN ---
-            e1 = self.enc1(x)
+            # 2. Path A: Spatial CNN (Use processed data)
+            e1 = self.enc1(x_proc)
             e2 = self.enc2(self.pool(e1))
             e3 = self.enc3(self.pool(e2))
             e4 = self.enc4(self.pool(e3))
             
-            # Pull global spatial features
             z_spatial = F.adaptive_avg_pool2d(e4, (self.fc_spatial, self.fc_spatial))
-            z_spatial = z_spatial.reshape(z_spatial.size(0), -1) # flattened for Linear
-            
-            # Compress CNN features to 128
+            z_spatial = z_spatial.reshape(z_spatial.size(0), -1)
             z_spatial = self.cnn_bottleneck(z_spatial)
 
-            # --- Path B: Spectral PSD ---
-            #psd_raw = self.psd_calculator(x_log) 
-            
-            # FIX: Just call the MLP directly once. No loop needed.
-            #z_spectral = self.psd_mlp(psd_raw)
-            z_freq = self.fft_encoder(x)
+            # 3. Path B: FFT CNN (Use processed data)
+            z_freq = self.fft_encoder(x_proc)
+            #z_freq = self.fft_encoder(x)
 
-            # --- Path C: Weighted Fusion ---
-            # Concatenate 128 + 128 = 256
-            #z_combined = torch.cat([z_spatial, z_spectral * self.psd_weight], dim=1)
+            # 4. Path C: Fusion
             z_combined = torch.cat([z_spatial, z_freq], dim=1)
-            
-            out = self.regressor(z_combined)
-            return out
+            return self.regressor(z_combined)
 
     def criterion1(self, preds, target):
         target = torch.clamp(target, min=1e-6)
