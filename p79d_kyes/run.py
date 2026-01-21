@@ -1,3 +1,4 @@
+import torch.nn.functional as F
 from importlib import reload
 import sys
 import os
@@ -19,12 +20,14 @@ reload(torch_power)
 new_model   = 1
 load_model  = 0
 train_model = 1
-save_model  = 1
+save_model = 1
 plot_models = 1
 
+def nparam(model):
+    return sum( param.numel() for param in model.parameters() if param.requires_grad)
 
 if new_model:
-    import networks.net0139 as net
+    import networks.net4004  as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
@@ -39,6 +42,7 @@ if train_model:
     t0 = time.time()
 
     #import networks.net0064 as othernet
+    print("Train model ",model.idd)
     net.train(model,all_data)
     if save_model:
         oname = "models/test%d.pth"%model.idd
@@ -51,8 +55,18 @@ if train_model:
     sec = (t1 - hrs*3600-minute*60)#//60
     total_time="%02d:%02d:%02d"%(hrs,minute,sec)
 
-
+import plotter
+reload(plotter)
+reload(plotter)
 if plot_models:
+    net_name = "net%04d"%net.idd
+    model.eval()
+    plotter.plot1(net_name, model, all_data, 'WTF', subset='test')
+    #plotter.plot1(net_name, model, all_data, 'WTF', subset='train')
+    #plotter.plot1(net_name, model, all_data, 'WTF', subset='valid')
+    #plotter.plot_hot(net_name, model, all_data, 'WTF')
+
+if False:
     if hasattr(model,'train_curve'):
         net.plot_loss_curve(model)
     else:
@@ -65,20 +79,21 @@ if plot_models:
     else:
         ds_train = net.SphericalDataset(all_data['train'])
         ds_val   = net.SphericalDataset(all_data['valid'])
-        #ds_tst   = net.SphericalDataset(all_data['test'])
+        ds_tst   = net.SphericalDataset(all_data['test'])
     print('ploot')
     delta = []
     err={'train':[],'valid':[],'test':[]}
     detail_err = {'train':[],'valid':[],'test':[]}
     subs = ['train','valid','test']
     subs = ['train','valid']
+    subs = ['train']
     fig1,ax=plt.subplots(2,3,figsize=(12,4))
 
     for ns,subset in enumerate(subs):
         mmin=20
         mmax=-20
         #this_set = {'train':ds_train, 'valid':ds_val, 'test':ds_tst}[subset]
-        this_set = {'train':ds_train, 'valid':ds_val}[subset]
+        this_set = ds_train #{'train':ds_train, 'valid':ds_val}[subset]
 
         with torch.no_grad():
             for n in tqdm.tqdm(range(len(this_set))):
@@ -108,7 +123,7 @@ if plot_models:
                     err[subset].append( model.criterion(moo,EB.unsqueeze(0)))
             errs = np.array([e.item() for e in err[subset]])
             args = np.argsort(errs)
-            if subset == 'train':
+            if subset == 'test':
                 dothese = np.concatenate([np.arange(10),args[:10],args[-10:]])
             else:
                 dothese = np.arange( len(this_set))
