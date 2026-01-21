@@ -91,35 +91,68 @@ def plot_three_err(Eguess,Etarget,var,out_prob,mean,model,fig=None,axs=None, tit
     axs[5].plot( [Emin,Emax],[Emin,Emax],c='k')
 
 def plot_scalars(net_name,train_loader, val_loader, tst_loader, model):
+    def exp(a):
+        out = a
+        if hasattr(model,'predict_log'):
+            if model.predict_log:
+                out = np.exp(a)
 
     subs = ['test']
+
     device = 'cuda'
-    ms_net=[]
-    ms_target=[]
-    ma_net=[]
-    ma_target=[]
     for ns,subset in enumerate(subs):
+        ms_net=[]
+        ms_target=[]
+        ma_net=[]
+        ma_target=[]
         mmin=20
         mmax=-20
         this_set = {'train':train_loader, 'valid':val_loader, 'test':tst_loader}[subset]
-        fig,ax=plt.subplots(1,2)
+        fig,ax=plt.subplots(1,3, figsize=(12,4))
 
         maxs=0
         maxa=0
+        plot_ma_line=False
+        counter=0
         with torch.no_grad():
             for xb, yb in tqdm.tqdm(this_set):
+
                 import pdb; pdb.set_trace()
                 ms,ma = yb[1][0].cpu()
                 moo = model( xb )
-                ms_moo, ma_moo = moo[-1][0].cpu()
-                ms_net.append(ms_moo.item())
-                ma_net.append(ma_moo.item())
-                ms_target.append(ms)
+                if hasattr(model,'predict_image'):
+                    ms_moo,ma_moo = moo[-1][0].cpu()
+                    ms_moo = ms_moo.item()
+                    ma_moo = ma_moo.item()
+                    ms,ma = yb[-1][0].cpu()
+                elif model.n_scalars == 2 and not hasattr(model,'predict_mu_sigma'):
+                    ms_moo, ma_moo = moo[-1].cpu()
+                    ms_moo = ms_moo.item()
+                    ma_moo = ma_moo.item()
+                    ms,ma = yb[-1].cpu()
+
+                elif model.n_scalars == 2 and hasattr(model,'predict_mu_sigma'):
+                    #ms_moo, ma_moo = moo[-1].cpu()
+                    #ms_moo, sigma_moo = moo
+                    ms_moo = moo[0]
+                    ms_moo = ms_moo.cpu()
+                    ms_moo = ms_moo.item()
+                    ma_moo = 0
+                    ms = yb[-1].cpu().item()
+                    ma = ms
+                    plot_ma_line=False
+                else:
+                    ms_moo, ma_moo = moo[-1][0].cpu().item(), 0
+                    ms,ma = yb[0][0].cpu(),0
+
+                ms_net.append(exp(ms_moo))
+                ma_net.append(ma_moo)
+                ms_target.append(exp(ms))
                 ma_target.append(ma)
 
                 #ax[0].scatter(ms, moo[0][0].cpu())
                 #ax[1].scatter(ma, moo[0][1].cpu())
-                maxs=max([maxs,ms])
+                maxs=max([maxs,exp(ms)])
                 maxa=max([maxa,ma])
         if len(ms_target) < 100:
             for a,b in zip(ms_target,ms_net):
@@ -128,10 +161,16 @@ def plot_scalars(net_name,train_loader, val_loader, tst_loader, model):
                 ax[1].scatter(a,b)
         else:
             pch.simple_phase(ms_target,ms_net,ax=ax[0])
-            pch.simple_phase(ma_target,ma_net,ax=ax[1])
+            pch.simple_phase(ms_target,1-np.array(ms_net)/np.array(ms_target),ax=ax[1])
+            #pch.simple_phase(ma_target,ma_net,ax=ax[1])
 
         ax[0].plot( [0,maxs],[0,maxs])
-        ax[1].plot( [0,maxa],[0,maxa])
+        if plot_ma_line:
+            ax[1].plot( [0,maxa],[0,maxa])
+        q=1-np.array(ms_net)/np.array(ms_target)
+        ax[2].hist(q)
+        rms = np.sqrt( (q**2).mean())
+        ax[2].set(title='rms error %0.2f'%rms)
         fig.savefig('%s/plots/%s_scalars_%s'%(os.environ['HOME'],net_name,subset))
 
 def plot_scalar_onlyms(net_name,train_loader, val_loader, tst_loader, model):
@@ -230,7 +269,10 @@ def plot_loss_curve(net_name,model, suffix):
     plt.plot(model.train_curve.cpu(), label="train")
     plt.plot(model.val_curve.cpu(),   label="val") 
     plt.yscale("log")
-    plt.ylim([1e-2,10])
+    a = model.train_curve.cpu()
+    b = model.val_curve.cpu()
+    minn = min([a[a>0].min(), b[b>0].min(), 1e-2])
+    plt.ylim([minn,10])
 
 
     plt.legend() 
@@ -278,33 +320,37 @@ def plot1(net_name,model, all_data, suffix = "", subset = 'test', erronly=True):
     Nsamples=10
     print('Subset',subset, 'nsamples',Nsamples)
     error_list = defaultdict(list)
-    with torch.no_grad():
-        for xb,yb in tqdm.tqdm(this_set):
-            moo = model( xb )
+    if hasattr( model, 'predict_scalars'):
+        plot_scalars(net_name,train_loader, val_loader, tst_loader,model)
+    if 0:
 
-            err_dict= model.criterion1(moo,yb)
-            for err in err_dict:
-                error_list[err].append(err_dict[err].item())
-            error_list['total'].append( sum(err_dict.values()).item())
-    #if erronly:
-    #    return error_list
-    fig,ax=plt.subplots(1,1)
-    colors = {'L1_0':'c','L1_1':'m','L1_2':'y','L1_3':'m','L1_4':'m','L1_Multi':'m','Pear':'r','Grad':'g','SSIM':'b','Power':'purple', 'total':'k'}
-    for err in error_list:
-        eee =  error_list[err]
-        x = sorted(eee)
-        y = np.arange(len(x))/len(x)
-        ax.plot(x,y,label=err,color=colors.get(err,'orange'))
-    ax.legend(loc=0)
-    ax.set(xscale='log',xlim=[1e-2,5])
-    fig.savefig('%s/plots/%s_%s_%s_errors.png'%(os.environ['HOME'],net_name,suffix,subset))
+        with torch.no_grad():
+            for xb,yb in tqdm.tqdm(this_set):
+                moo = model( xb )
+
+                err_dict= model.criterion1(moo,yb)
+                for err in err_dict:
+                    error_list[err].append(err_dict[err].item())
+                error_list['total'].append( sum(err_dict.values()).item())
+        #if erronly:
+        #    return error_list
+        fig,ax=plt.subplots(1,1)
+        colors = {'L1_0':'c','L1_1':'m','L1_2':'y','L1_3':'m','L1_4':'m','L1_Multi':'m','Pear':'r','Grad':'g','SSIM':'b','Power':'purple', 'total':'k'}
+        for err in error_list:
+            eee =  error_list[err]
+            x = sorted(eee)
+            y = np.arange(len(x))/len(x)
+            ax.plot(x,y,label=err,color=colors.get(err,'orange'))
+        ax.legend(loc=0)
+        ax.set(xscale='log',xlim=[1e-2,5])
+        fig.savefig('%s/plots/%s_%s_%s_errors.png'%(os.environ['HOME'],net_name,suffix,subset))
 
 
     #subs = ['train','valid','test']
     #subs = ['test','valid', 'train']
     #subs = ['valid']
-    if hasattr( model, 'predict_scalars'):
-        plot_scalars(net_name,train_loader, val_loader, tst_loader,model)
+    if hasattr(model,'predict_scalars_only'):
+        return
     for ns,subset in enumerate(subs):
         mmin=20
         mmax=-20
@@ -339,7 +385,8 @@ def plot1(net_name,model, all_data, suffix = "", subset = 'test', erronly=True):
                 else:
 
                     moo = model( xb)
-                EB = yb[0][0]
+                #EB = yb[0][0]
+                EB = yb[0].squeeze(0)
                 EBguess = moo[0][0]
 
                 if EB_samples is not None:
@@ -365,8 +412,8 @@ def plot1(net_name,model, all_data, suffix = "", subset = 'test', erronly=True):
                         plot_three(EBguess[2,:,:], EB[2,:,:],title='B', axs=ax2, fig=fig)
                     elif EBguess.shape[0]==2:
                         #plot_three(EBguess[0,:,:], EB[0,:,:],title='T', axs=ax0)
-                        for aaa in ax0:
-                            aaa.imshow(Tmode.detach().cpu().numpy())
+                        #for aaa in ax0:
+                        #    aaa.imshow(Tmode.detach().cpu().numpy())
                         plot_three(EBguess[0,:,:], EB[0,:,:],title='E', axs=ax1, fig=fig)
                         plot_three(EBguess[1,:,:], EB[1,:,:],title='B', axs=ax2, fig=fig)
 
