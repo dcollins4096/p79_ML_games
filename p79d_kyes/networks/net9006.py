@@ -21,14 +21,14 @@ dirpath = "./"
 fname_train = "p79d_subsets_S128_N1_xyz_suite7vs_first.h5"
 fname_valid = "p79d_subsets_S128_N1_xyz_suite7vs_second.h5"
 
-ntrain = 1000 #14000
+ntrain = 14000
 nvalid = 100  #stratified
 ntest = 5000
 downsample = None
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Net9001 architecture (larger model)
-epochs = 10
+epochs = 200
 lr = 5e-4
 batch_size = 64
 lr_schedule = [1000]
@@ -168,18 +168,6 @@ class SphericalDataset(Dataset):
         return data.to(device), torch.log(torch.tensor([ms], dtype=torch.float32).to(device))
 
 
-def set_seed(seed=8675309):
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.use_deterministic_algorithms(True)   # strongest setting
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False     # IMPORTANT
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
 
 
 class DropPath(nn.Module):
@@ -359,7 +347,7 @@ class VisionTransformer(nn.Module):
 
 def trainer(model, all_data, epochs=50, batch_size=64, lr=5e-4,
             weight_decay=0.01, lr_schedule=[1000]):
-    set_seed()
+    #set_seed()
 
     ds_train = SphericalDataset(all_data['train'], all_data['quantities']['train'], augment=True)
     ds_val = SphericalDataset(all_data['valid'], all_data['quantities']['valid'], augment=False)
