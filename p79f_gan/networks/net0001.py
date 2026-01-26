@@ -427,8 +427,9 @@ def train_gan(
     optG = torch.optim.Adam(list(G.parameters()) + list(mach_embed.parameters()), lr=lr, betas=(0.0, 0.99))
     optD = torch.optim.Adam(D.parameters(), lr=lr, betas=(0.0, 0.99))
 
-    scalerG = GradScaler(device)
-    scalerD = GradScaler(device)
+    use_amp = (device == "cuda")
+    scalerG = GradScaler(device, enabled=use_amp)
+    scalerD = GradScaler(device, enabled=use_amp)
 
     data_iter = iter(loader)
 
@@ -450,8 +451,7 @@ def train_gan(
 
         x_real.requires_grad_(True)
 
-        #with autocast(device):
-        if 1:
+        with autocast(device, enabled=use_amp):
             c = mach_embed(mach)
 
             z = torch.randn(x_real.size(0), z_dim, device=device)
@@ -476,8 +476,7 @@ def train_gan(
 
         # --- Generator ---
         optG.zero_grad(set_to_none=True)
-        #with autocast(device):
-        if 1:
+        with autocast(device, enabled=use_amp):
             c = mach_embed(mach)  # same batch conditioning
             z = torch.randn(x_real.size(0), z_dim, device=device)
             x_fake = G(z, c)
@@ -511,7 +510,6 @@ def train_gan(
             plt.tight_layout()
             oot=f"%s/plots/debug_real_fake_{step:04}.png"%os.environ['HOME']
             plt.savefig(oot, dpi=150)
-            print(oot)
             plt.close()
 
     return G, G_ema, D, mach_embed
