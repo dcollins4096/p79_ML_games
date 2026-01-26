@@ -144,13 +144,16 @@ def estimate_log_stats(x, n=2048, eps=0.0):
     return mean, std
 
 
-ass TurbulenceDataset(Dataset):
+class TurbulenceDataset(Dataset):
     def __init__(self, all_data, quan, augment=False, mean=0.0, std=1.0):
         self.quan = quan
         self.all_data = all_data
         self.augment = augment
         self.mean = float(mean)
         self.std = float(std)
+
+    def __len__(self):
+        return self.all_data.shape[0]   # or len(self.all_data)
 
     def __getitem__(self, idx):
         data = self.all_data[idx][0:1].float()  # [1,H,W]
@@ -225,14 +228,14 @@ class GBlock(nn.Module):
     def forward(self, x, c):
         h = self.film1(x, c)
         h = F.silu(h)
-        h = F.interpolate(h, scale_factor=2, mode="nearest")
+        h = F.interpolate(h, scale_factor=2, mode="bilinear", align_corners=False)
         h = self.conv1(h)
 
         h = self.film2(h, c)
         h = F.silu(h)
         h = self.conv2(h)
 
-        x_up = F.interpolate(x, scale_factor=2, mode="nearest")
+        x_up = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
         if self.skip is not None:
             x_up = self.skip(x_up)
         return h + x_up
@@ -408,8 +411,8 @@ def train_gan(
     lr=lr,
     ch=64,
     out_ch=1,
-    r1_gamma=1.0,
-    r1_every=16,
+    r1_gamma=0.1,
+    r1_every=32,
     ema_decay=0.999,
     steps=100000
 ):
@@ -453,7 +456,7 @@ def train_gan(
 
             z = torch.randn(x_real.size(0), z_dim, device=device)
             x_fake = G(z, c).detach()
-            x_fake = aug_turbulence(x_fake)
+            #x_fake = aug_turbulence(x_fake)
 
             d_real, _ = D(x_real, c)
             d_fake, _ = D(x_fake, c)
@@ -478,7 +481,7 @@ def train_gan(
             c = mach_embed(mach)  # same batch conditioning
             z = torch.randn(x_real.size(0), z_dim, device=device)
             x_fake = G(z, c)
-            x_fake = aug_turbulence(x_fake)
+            #x_fake = aug_turbulence(x_fake)
 
             d_fake, _ = D(x_fake, c)
             lossG = g_hinge_loss(d_fake)
@@ -506,7 +509,9 @@ def train_gan(
             a = sorted(xf.flatten())
             plt.subplot(2,2,4); plt.plot( a, np.arange(len(a))/len(a))
             plt.tight_layout()
-            plt.savefig(f"%s/plots/debug_real_fake_{step:04}.png"%os.environ['HOME'], dpi=150)
+            oot=f"%s/plots/debug_real_fake_{step:04}.png"%os.environ['HOME']
+            plt.savefig(oot, dpi=150)
+            print(oot)
             plt.close()
 
     return G, G_ema, D, mach_embed
