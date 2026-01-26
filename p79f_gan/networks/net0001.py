@@ -31,7 +31,7 @@ print("Using device:", device)
 
 # Hyperparameters
 epochs = 500
-lr = 5e-4
+lr = 1e-4
 batch_size = 64
 lr_schedule = [1000]
 weight_decay = 0.01
@@ -131,36 +131,47 @@ def thisnet():
     model = model.to(device)
     return model
 
+@torch.no_grad()
+def estimate_log_stats(x, n=2048, eps=0.0):
+    # x: [N, C, H, W] torch tensor or numpy -> torch
+    if not torch.is_tensor(x):
+        x = torch.from_numpy(x)
+    x = x[:min(n, x.shape[0])].float()
+    x = x[:, 0:1]  # density channel
+    x = torch.log1p(torch.clamp_min(x, 0.0))  # safe log
+    mean = x.mean().item()
+    std  = x.std().item()
+    return mean, std
 
 
-
-class TurbulenceDataset(Dataset):
-    def __init__(self, all_data, quan, augment=False):
+ass TurbulenceDataset(Dataset):
+    def __init__(self, all_data, quan, augment=False, mean=0.0, std=1.0):
         self.quan = quan
         self.all_data = all_data
         self.augment = augment
-
-    def __len__(self):
-        return self.all_data.size(0)
+        self.mean = float(mean)
+        self.std = float(std)
 
     def __getitem__(self, idx):
-        data = self.all_data[idx][0:1]
-        
+        data = self.all_data[idx][0:1].float()  # [1,H,W]
+
+        # image transform FIRST (before aug or after; both can work)
+        data = torch.log1p(torch.clamp_min(data, 0.0))
+        data = (data - self.mean) / (self.std + 1e-6)
+        data = data.clamp(-5, 5)  # helps early stability
+
+        # augments
         if self.augment:
             H, W = data[0].shape
             dy = torch.randint(0, H, (1,)).item()
             dx = torch.randint(0, W, (1,)).item()
             data = torch.roll(data, shifts=(dy, dx), dims=(-2, -1))
-            
-            if torch.rand(1) > 0.5:
-                data = torch.flip(data, dims=[-1])
-            if torch.rand(1) > 0.5:
-                data = torch.flip(data, dims=[-2])
-        
-        ms = self.quan['Ms_act'][idx]
-        #return data.to(device), torch.tensor([ms], dtype=torch.float32).to(device)
-        return data.to(device), torch.log(torch.tensor([ms], dtype=torch.float32).to(device))
-        
+            if torch.rand(1) > 0.5: data = torch.flip(data, dims=[-1])
+            if torch.rand(1) > 0.5: data = torch.flip(data, dims=[-2])
+
+        ms = float(self.quan['Ms_act'][idx])
+        ms = math.log(ms)  # ok, but…
+        return data, torch.tensor(ms, dtype=torch.float32)
 
 
 # ----------------------------
@@ -203,13 +214,13 @@ class FiLM(nn.Module):
 class GBlock(nn.Module):
     def __init__(self, in_ch, out_ch, cond_dim):
         super().__init__()
-        self.conv1 = spectral_norm(nn.Conv2d(in_ch, out_ch, 3, padding=1))
-        self.conv2 = spectral_norm(nn.Conv2d(out_ch, out_ch, 3, padding=1))
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
         self.film1 = FiLM(cond_dim, in_ch)
         self.film2 = FiLM(cond_dim, out_ch)
         self.skip = None
         if in_ch != out_ch:
-            self.skip = spectral_norm(nn.Conv2d(in_ch, out_ch, 1))
+            self.skip = nn.Conv2d(in_ch, out_ch, 1)
 
     def forward(self, x, c):
         h = self.film1(x, c)
@@ -234,7 +245,7 @@ class Generator(nn.Module):
         self.z_dim = z_dim
         self.im_size = im_size
 
-        self.fc = spectral_norm(nn.Linear(z_dim, 4 * 4 * (ch * 8)))
+        self.fc = nn.Linear(z_dim, 4 * 4 * (ch * 8))
         self.blocks = nn.ModuleList()
 
         # 4->8->16->32->64->128 (and optionally 256)
@@ -251,7 +262,7 @@ class Generator(nn.Module):
             self.blocks.append(GBlock(final_ch, final_ch//2, cond_dim))  # 128->256
             final_ch = final_ch//2
 
-        self.to_img = spectral_norm(nn.Conv2d(final_ch, out_ch, 3, padding=1))
+        self.to_img = nn.Conv2d(final_ch, out_ch, 3, padding=1)
 
     def forward(self, z, c):
         h = self.fc(z).view(z.size(0), -1, 4, 4)
@@ -370,11 +381,19 @@ def r1_reg(d_out, x_real):
 
 @torch.no_grad()
 def update_ema(ema_model, model, decay=0.999):
-    for p_ema, p in zip(ema_model.parameters(), model.parameters()):
+    # parameters
+    for (name, p_ema) in ema_model.named_parameters():
+        p = dict(model.named_parameters())[name]
         p_ema.data.mul_(decay).add_(p.data, alpha=1.0 - decay)
+    # buffers (e.g., running stats if you later add norms)
+    for (name, b_ema) in ema_model.named_buffers():
+        b = dict(model.named_buffers())[name]
+        b_ema.copy_(b)
+
 
 def train(all_data, **kwargs):
-    ds_train = TurbulenceDataset(all_data['train'], all_data['quantities']['train'], augment=True)
+    mean, std = estimate_log_stats(all_data['train'])
+    ds_train = TurbulenceDataset(all_data['train'], all_data['quantities']['train'], augment=True, mean=mean, std=std)
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, drop_last=False)
     G, G_ema, D, mach_embed = train_gan(train_loader, **kwargs)
     return G, G_ema, D, mach_embed
@@ -386,7 +405,7 @@ def train_gan(
     im_size=128,
     z_dim=128,
     cond_dim=128,
-    lr=2e-4,
+    lr=lr,
     ch=64,
     out_ch=1,
     r1_gamma=1.0,
@@ -487,7 +506,7 @@ def train_gan(
             a = sorted(xf.flatten())
             plt.subplot(2,2,4); plt.plot( a, np.arange(len(a))/len(a))
             plt.tight_layout()
-            plt.savefig(f"%s/plots/debug_real_fake_{step}.png"%os.environ['HOME'], dpi=150)
+            plt.savefig(f"%s/plots/debug_real_fake_{step:04}.png"%os.environ['HOME'], dpi=150)
             plt.close()
 
     return G, G_ema, D, mach_embed
