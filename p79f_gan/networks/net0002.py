@@ -12,6 +12,7 @@ import loader
 import os
 from torch.nn.utils import spectral_norm
 from torch.amp import autocast, GradScaler
+import h5py
 
 idd = 2
 what = "GAN with lines"
@@ -19,7 +20,10 @@ what = "GAN with lines"
 #dirpath = "/home/dcollins/repos/p79_ML_games/p79d_kyes/datasets/"
 #dirpath = "./"
 
-fname = "datasets/random_lines_128.h5"
+fname = "datasets/random_lines_128_fixed.h5"
+fname = "datasets/random_lines_128_12zones.h5"
+fname = "datasets/random_lines_128_32zones.h5"
+#fname = "datasets/random_lines_128_64zones.h5"
 
 ntrain = 14000
 nvalid = 100
@@ -36,7 +40,7 @@ lr_schedule = [1000]
 weight_decay = 0.01
 
 # Hybrid architecture parameters
-img_size = 128
+img_size = 32
 cnn_output_size = 64  # After CNN pooling: 128 → 64
 patch_size = 8  # Smaller patches on reduced resolution
 embed_dim = 384
@@ -88,41 +92,69 @@ def estimate_log_stats(x, n=2048, eps=0.0):
     return mean, std
 
 
+import h5py
+import torch
+from torch.utils.data import Dataset
+
 class LineDataset(Dataset):
-    def __init__(self, all_data):
+    def __init__(self, all_data, img_size=img_size, to_minus1_1=True):
         self.all_data = all_data
+        self.img_size = img_size
+        self.to_minus1_1 = to_minus1_1
 
     def __len__(self):
-        return self.all_data[images].shape[0]
+        return self.all_data['images'].shape[0]
 
     def __getitem__(self, idx):
-        x0 = self.all_data['x0'][idx]
-        y0 = self.all_data['y0'][idx]
-        theta = self.all_data['theta'][idx]
-        width = self.all_data['width'][idx]
-        image = self.all_data['images'][idx]
-        params = (x0,y0,theta,width)
-        return params, image
+        x0    = self.all_data['x0'][idx].float()
+        y0    = self.all_data['y0'][idx].float()
+        theta = self.all_data['theta'][idx].float()
+        width = self.all_data['width'][idx].float()
 
+        # image: [128,128] -> [1,128,128]
+        img = self.all_data['images'][idx].float()
+        if img.ndim == 2:
+            img = img.unsqueeze(0)
+
+        # map {0,1} -> {-1,+1} (recommended for GAN with tanh)
+        if self.to_minus1_1:
+            img = img * 2.0 - 1.0
+
+        # normalize params to roughly [-1,1]
+        # x0,y0 are in pixel coords [0,127]
+        x0n = (x0 / (self.img_size - 1.0)) * 2.0 - 1.0
+        y0n = (y0 / (self.img_size - 1.0)) * 2.0 - 1.0
+
+        # width: pick a scale based on your generator range; if widths are ~[1,6], this is fine
+        # map to [-1,1] assuming width_range=(1,6); adjust if different
+        wmin, wmax = 1.0, 6.0
+        wn = (width - wmin) / (wmax - wmin) * 2.0 - 1.0
+
+        # theta -> (cos,sin)
+        cth = torch.cos(theta)
+        sth = torch.sin(theta)
+
+        cond = torch.stack([x0n, y0n, cth, sth, wn], dim=0)  # [5]
+        return cond, img
 
 
 # ----------------------------
 # Utilities: conditioning
 # ----------------------------
 
-class MachEmbed(nn.Module):
-    """Embed a scalar Mach number into a conditioning vector."""
-    def __init__(self, embed_dim=128):
+class ParamEmbed(nn.Module):
+    """Embed conditioning vector into cond_dim."""
+    def __init__(self, in_dim=5, embed_dim=128):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(1, embed_dim),
+            nn.Linear(in_dim, embed_dim),
             nn.SiLU(),
             nn.Linear(embed_dim, embed_dim),
             nn.SiLU(),
         )
 
-    def forward(self, mach):  # mach: [B]
-        return self.net(mach.view(-1, 1))
+    def forward(self, cond):  # cond: [B,5]
+        return self.net(cond)
 
 
 class FiLM(nn.Module):
@@ -146,8 +178,8 @@ class FiLM(nn.Module):
 class GBlock(nn.Module):
     def __init__(self, in_ch, out_ch, cond_dim):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
-        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1, padding_mode="reflect")
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1, padding_mode="reflect")
         self.film1 = FiLM(cond_dim, in_ch)
         self.film2 = FiLM(cond_dim, out_ch)
         self.skip = None
@@ -173,28 +205,35 @@ class GBlock(nn.Module):
 class Generator(nn.Module):
     def __init__(self, z_dim=128, cond_dim=128, ch=64, out_ch=1, im_size=128):
         super().__init__()
-        assert im_size in [64, 128, 256], "Adjust blocks if using other sizes."
+        assert im_size in [32, 64, 128, 256], "im_size must be one of {32,64,128,256}"
         self.z_dim = z_dim
         self.im_size = im_size
 
+        # start from 4x4
         self.fc = nn.Linear(z_dim, 4 * 4 * (ch * 8))
-        self.blocks = nn.ModuleList()
 
-        # 4->8->16->32->64->128 (and optionally 256)
-        self.blocks.append(GBlock(ch*8, ch*8, cond_dim))  # 4->8
-        self.blocks.append(GBlock(ch*8, ch*4, cond_dim))  # 8->16
-        self.blocks.append(GBlock(ch*4, ch*2, cond_dim))  # 16->32
-        self.blocks.append(GBlock(ch*2, ch*1, cond_dim))  # 32->64
-        if im_size >= 128:
-            self.blocks.append(GBlock(ch*1, ch//2, cond_dim))  # 64->128
-            final_ch = ch//2
-        else:
+        blocks = []
+        # Always: 4->8 and 8->16
+        blocks.append(GBlock(ch*8, ch*8, cond_dim))  # 4->8
+        blocks.append(GBlock(ch*8, ch*4, cond_dim))  # 8->16
+
+        if im_size >= 32:
+            blocks.append(GBlock(ch*4, ch*2, cond_dim))  # 16->32
+            final_ch = ch*2
+        if im_size >= 64:
+            blocks.append(GBlock(final_ch, ch*1, cond_dim))  # 32->64
             final_ch = ch*1
+        if im_size >= 128:
+            blocks.append(GBlock(final_ch, ch//2, cond_dim))  # 64->128
+            final_ch = ch//2
         if im_size >= 256:
-            self.blocks.append(GBlock(final_ch, final_ch//2, cond_dim))  # 128->256
-            final_ch = final_ch//2
+            blocks.append(GBlock(final_ch, max(final_ch//2, 8), cond_dim))  # 128->256
+            final_ch = max(final_ch//2, 8)
 
-        self.to_img = nn.Conv2d(final_ch, out_ch, 3, padding=1)
+        self.blocks = nn.ModuleList(blocks)
+
+        # Use reflect padding to avoid border cheats
+        self.to_img = nn.Conv2d(final_ch, out_ch, 3, padding=1, padding_mode="reflect")
 
     def forward(self, z, c):
         h = self.fc(z).view(z.size(0), -1, 4, 4)
@@ -202,8 +241,7 @@ class Generator(nn.Module):
             h = blk(h, c)
         h = F.silu(h)
         x = self.to_img(h)
-        return x  # keep as real-valued (no tanh) since we standardize data
-
+        return torch.tanh(x)  # if your real images are scaled to [-1,1]
 
 # ----------------------------
 # Discriminator (projection)
@@ -212,8 +250,8 @@ class Generator(nn.Module):
 class DBlock(nn.Module):
     def __init__(self, in_ch, out_ch):
         super().__init__()
-        self.conv1 = spectral_norm(nn.Conv2d(in_ch, out_ch, 3, padding=1))
-        self.conv2 = spectral_norm(nn.Conv2d(out_ch, out_ch, 3, padding=1))
+        self.conv1 = spectral_norm(nn.Conv2d(in_ch, out_ch, 3, padding=1, padding_mode="reflect"))
+        self.conv2 = spectral_norm(nn.Conv2d(out_ch, out_ch, 3, padding=1, padding_mode="reflect"))
         self.skip = spectral_norm(nn.Conv2d(in_ch, out_ch, 1)) if in_ch != out_ch else None
 
     def forward(self, x):
@@ -227,9 +265,9 @@ class DBlock(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, cond_dim=128, ch=64, in_ch=1, im_size=128):
+    def __init__(self, cond_dim=128, ch=64, in_ch=1, im_size=img_size):
         super().__init__()
-        assert im_size in [64, 128, 256], "Adjust blocks if using other sizes."
+        assert im_size in [32,64, 128, 256], "Adjust blocks if using other sizes."
         self.im_size = im_size
 
         layers = []
@@ -266,6 +304,7 @@ class Discriminator(nn.Module):
 # ----------------------------
 
 def aug_turbulence(x):
+    return x
     # x: [B,C,H,W]
     # periodic roll
     if torch.rand(()) < 0.9:
@@ -326,14 +365,14 @@ def update_ema(ema_model, model, decay=0.999):
 def train(all_data, **kwargs):
     ds_train = LineDataset(all_data)
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True, drop_last=False, pin_memory=True)
-    G, G_ema, D, mach_embed = train_gan(train_loader, **kwargs)
-    return G, G_ema, D, mach_embed
+    G, G_ema, D, cond_embed = train_gan(train_loader, **kwargs)
+    return G, G_ema, D, cond_embed
 
 
 def train_gan(
     loader,  # yields (x, mach)
     device="cuda",
-    im_size=128,
+    im_size=img_size,
     z_dim=128,
     cond_dim=128,
     lr=lr,
@@ -344,7 +383,7 @@ def train_gan(
     ema_decay=0.999,
     steps=100000
 ):
-    mach_embed = MachEmbed(embed_dim=cond_dim).to(device)
+    cond_embed = ParamEmbed(in_dim=5, embed_dim=cond_dim).to(device)
     G = Generator(z_dim=z_dim, cond_dim=cond_dim, ch=ch, out_ch=out_ch, im_size=im_size).to(device)
     D = Discriminator(cond_dim=cond_dim, ch=ch, in_ch=out_ch, im_size=im_size).to(device)
 
@@ -352,7 +391,7 @@ def train_gan(
     G_ema.load_state_dict(G.state_dict())
     G_ema.eval()
 
-    optG = torch.optim.Adam(list(G.parameters()) + list(mach_embed.parameters()), lr=lr, betas=(0.0, 0.99))
+    optG = torch.optim.Adam(list(G.parameters()) + list(cond_embed.parameters()), lr=lr, betas=(0.0, 0.99))
     optD = torch.optim.Adam(D.parameters(), lr=lr, betas=(0.0, 0.99))
 
     use_amp = (device == "cuda")
@@ -365,23 +404,23 @@ def train_gan(
     steps = list(range(1, steps + 1))
     for step in tqdm.tqdm(steps):
         try:
-            x_real, mach = next(data_iter)
+            cond, x_real = next(data_iter)
         except StopIteration:
             data_iter = iter(loader)
-            x_real, mach = next(data_iter)
+            cond, x_real = next(data_iter)
 
         x_real = x_real.to(device, non_blocking=True).float()
-        mach = mach.to(device, non_blocking=True).float()
+        cond = cond.to(device, non_blocking=True).float()
 
         # --- Discriminator ---
         optD.zero_grad(set_to_none=True)
-        x_real = aug_turbulence(x_real)
+        #x_real = aug_turbulence(x_real)
 
         if step%r1_every == 0:
             x_real.requires_grad_(True)
 
         with autocast(device, enabled=use_amp):
-            c = mach_embed(mach)
+            c = cond_embed(cond)
 
             z = torch.randn(x_real.size(0), z_dim, device=device)
             x_fake = G(z, c).detach()
@@ -407,13 +446,14 @@ def train_gan(
         # --- Generator ---
         optG.zero_grad(set_to_none=True)
         with autocast(device, enabled=use_amp):
-            c = mach_embed(mach)  # same batch conditioning
+            c = cond_embed(cond)  # same batch conditioning
             z = torch.randn(x_real.size(0), z_dim, device=device)
             x_fake = G(z, c)
             #x_fake = aug_turbulence(x_fake)
 
             d_fake, _ = D(x_fake, c)
-            lossG = g_hinge_loss(d_fake)
+            l1 = (x_fake - x_real).abs().mean()
+            lossG = g_hinge_loss(d_fake) + 10.0*l1
 
         scalerG.scale(lossG).backward()
         scalerG.step(optG)
@@ -423,7 +463,7 @@ def train_gan(
 
         if step % 100 == 0:
             print(f"step {step:7d}  lossD {lossD.item():.4f}  lossG {lossG.item():.4f}")
-        if step % 20 == 0:
+        if step % 2 == 0:
             import matplotlib.pyplot as plt
             xr = x_real[0,0].detach().float().cpu().numpy()
             xf = x_fake[0,0].detach().float().cpu().numpy()
@@ -465,5 +505,5 @@ def train_gan(
                 print("hinge active real:", (1.0 - d_real.detach() > 0).float().mean().item(),
                       "fake:", (1.0 + d_fake.detach() > 0).float().mean().item())
 
-    return G, G_ema, D, mach_embed
+    return G, G_ema, D, cond_embed
 
