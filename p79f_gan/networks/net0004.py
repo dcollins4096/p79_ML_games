@@ -425,24 +425,28 @@ def train(all_data, **kwargs):
 
 import torch
 
-def make_radial_bins(H, W, device="cpu"):
-    """
-    Returns:
-      bin_idx: [H, W//2+1] long indices for each rfft2 frequency
-      nbins: int
-    """
-    fy = torch.fft.fftfreq(H, d=1.0, device=device)  # [-0.5..0.5)
-    fx = torch.fft.rfftfreq(W, d=1.0, device=device) # [0..0.5]
+import torch
+
+def make_radial_bins_and_centers(H, W, device="cpu"):
+    fy = torch.fft.fftfreq(H, d=1.0, device=device)    # cycles/pixel
+    fx = torch.fft.rfftfreq(W, d=1.0, device=device)   # cycles/pixel (nonnegative)
     ky, kx = torch.meshgrid(fy, fx, indexing="ij")
-    kr = torch.sqrt(kx**2 + ky**2)  # [H, W//2+1]
+    kr = torch.sqrt(kx**2 + ky**2)                     # cycles/pixel, shape [H, W//2+1]
 
-    # Bin by integer radius in "frequency-index units"
-    # Scale so smallest nonzero freq is ~1
-    kr_idx = kr * min(H, W)
+    kr_idx = kr * min(H, W)                            # "index units" ~1 per smallest mode
     bin_idx = torch.floor(kr_idx).long()
-
     nbins = int(bin_idx.max().item()) + 1
-    return bin_idx, nbins
+
+    # Bin centers in cycles/pixel: mean kr value per bin
+    flat_kr = kr.reshape(-1)
+    flat_idx = bin_idx.reshape(-1)
+
+    counts = torch.bincount(flat_idx, minlength=nbins).clamp_min(1)
+    sums   = torch.zeros(nbins, device=device, dtype=kr.dtype).scatter_add_(0, flat_idx, flat_kr)
+    k_centers = sums / counts.to(kr.dtype)             # cycles/pixel
+
+    return bin_idx, k_centers, nbins
+
 def isotropic_power_spectrum(x, bin_idx, nbins, eps=1e-12):
     """
     x: [B, 1, H, W] (or [B,H,W]) real-valued
@@ -482,15 +486,37 @@ def power_spectrum_loss(x_fake, x_real, bin_idx, nbins, log_eps=1e-12, remove_dc
     Pk_f = isotropic_power_spectrum(x_fake, bin_idx, nbins)  # [B,nb]
     Pk_r = isotropic_power_spectrum(x_real, bin_idx, nbins)  # [B,nb]
 
-    logPf = torch.log(Pk_f + log_eps)
-    logPr = torch.log(Pk_r + log_eps)
+    #logPf = torch.log(Pk_f + log_eps)
+    #logPr = torch.log(Pk_r + log_eps)
+    logPf = Pk_f 
+    logPr = Pk_r 
 
     # ignore k=0 bin if remove_dc (it should be tiny/noisy)
     if remove_dc and nbins > 1:
         logPf = logPf[:, 1:]
         logPr = logPr[:, 1:]
 
-    return (logPf - logPr).abs().mean()
+    return (logPf - logPr).abs().mean(), logPf, logPr
+
+def fft2_phase_loss(x_fake, x_real, *, norm="ortho", remove_dc=True, eps=1e-8):
+    """
+    Phase-only FFT loss: compares F/|F| to keep only phase.
+    """
+    assert x_fake.shape == x_real.shape
+    xf, xr = x_fake, x_real
+
+    if remove_dc:
+        xf = xf - xf.mean(dim=(-2, -1), keepdim=True)
+        xr = xr - xr.mean(dim=(-2, -1), keepdim=True)
+
+    Ff = torch.fft.fft2(xf, norm=norm)
+    Fr = torch.fft.fft2(xr, norm=norm)
+
+    Ff_u = Ff / (Ff.abs() + eps)
+    Fr_u = Fr / (Fr.abs() + eps)
+
+    diff = Ff_u - Fr_u
+    return (diff.real**2 + diff.imag**2).mean().sqrt()
 
 def train_gan(
     loader,  # yields (x, mach)
@@ -522,7 +548,8 @@ def train_gan(
     scalerD = GradScaler("cuda", enabled=use_amp)
 
     data_iter = iter(loader)
-    BIN_IDX, NBINS = make_radial_bins(img_size, img_size, device=device)
+    BIN_IDX, k_centers, NBINS = make_radial_bins_and_centers(img_size, img_size, device=device)
+
 
 
     import tqdm
@@ -581,9 +608,11 @@ def train_gan(
             lambda_ps = 0.5  # start 0.1–1.0 for 32×32; tune
 
 # inside your G step, after x_fake computed
-            ps = power_spectrum_loss(x_fake, x_real, BIN_IDX, NBINS, remove_dc=True)
+            ps,logPf, logPr  = power_spectrum_loss(x_fake, x_real, BIN_IDX, NBINS, remove_dc=True)
             l1 = (x_fake - x_real).abs().mean()
-            lossG = g_hinge_loss(d_fake) + 0.1*l1 + lambda_ps*ps
+            phase_loss=fft2_phase_loss(x_real,x_fake)
+
+            lossG = g_hinge_loss(d_fake) + 0.1*l1 + lambda_ps*ps + phase_loss
 
 
         scalerG.scale(lossG).backward()
@@ -601,13 +630,20 @@ def train_gan(
             vmin = min(xr.min(), xf.min())
             vmax = max(xr.max(), xf.max())
 
-            plt.figure(figsize=(8,4))
-            plt.subplot(2,2,1); plt.imshow(xr, origin="lower"); plt.title("REAL"); plt.colorbar()
-            plt.subplot(2,2,2); plt.imshow(xf, origin="lower"); plt.title("FAKE"); plt.colorbar()
+            plt.figure(figsize=(4,4))
+            plt.subplot(3,2,1); plt.imshow(xr, origin="lower"); plt.title("REAL"); plt.colorbar()
+            plt.subplot(3,2,2); plt.imshow(xf, origin="lower"); plt.title("FAKE"); plt.colorbar()
             a = sorted(xr.flatten())
-            plt.subplot(2,2,3); plt.plot( a, np.arange(len(a))/len(a))
+            plt.subplot(3,2,3); plt.plot( a, np.arange(len(a))/len(a))
             a = sorted(xf.flatten())
-            plt.subplot(2,2,4); plt.plot( a, np.arange(len(a))/len(a))
+            plt.subplot(3,2,4); plt.plot( a, np.arange(len(a))/len(a))
+            import pdb
+            ymin = min([logPr.min().cpu().detach().numpy(),logPf.min().cpu().detach().numpy()])
+            ymax = max([logPr.max().cpu().detach().numpy(),logPf.max().cpu().detach().numpy()])
+            plt.subplot(3,2,5); plt.plot(k_centers[1:].cpu(),logPr[0].cpu().detach().numpy()); plt.xscale('log'); plt.ylim(ymin,ymax)
+            plt.yscale('log')
+            plt.subplot(3,2,6); plt.plot(k_centers[1:].cpu(),logPf[0].cpu().detach().numpy()); plt.xscale('log'); plt.ylim(ymin,ymax)
+            plt.yscale('log')
             plt.tight_layout()
             oot=f"%s/plots/debug_real_fake_{step:04}.png"%os.environ['HOME']
             plt.savefig(oot, dpi=150)
