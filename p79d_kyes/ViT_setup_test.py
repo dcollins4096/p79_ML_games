@@ -20,14 +20,14 @@ reload(nbisht_plotter)
 from torch.utils.data import Dataset, DataLoader
 
 new_model   = 1
-load_model  = 1
-train_model = 0
+load_model  = 0
+train_model = 1
 save_model  = 1
 plot_models = 1
-net_name   = "net9004"
+net_name   = "net9005"
 
 if new_model:
-    import networks_nbisht.net9004 as net
+    import networks_nbisht.net9005 as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
