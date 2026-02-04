@@ -46,11 +46,10 @@ def load_ppv_cube(fits_path, data_format='auto'):
         ctype3 = header.get('CTYPE3', '').upper()
         
         print(f"Axis types: CTYPE1={ctype1}, CTYPE2={ctype2}, CTYPE3={ctype3}")
-        
-        if 'VELO' in ctype1:
+        if 'VELO' in ctype1 or 'VRAD' in ctype1:
             data_format = 'taurus'  #Taurus: (velo, glon, glat)
             print("Detected Taurus format (vlb)")
-        elif 'VELO' in ctype3:
+        elif 'VELO' in ctype3 or 'VRAD' in ctype3:
             data_format = 'perseus'  #Perseus: (ra, dec, velo)
             print("Detected Perseus format (xyv)")
         else:
@@ -173,6 +172,64 @@ def compute_moment_maps(data, velocity_axis, noise_threshold=3.0):
     print(f"Pixels with emission: {np.sum(emission_mask)} / {emission_mask.size}")
     
     return moment0, moment1, moment2, emission_mask
+
+def upsample_moment_maps(moment0, moment1, moment2, emission_mask, target_size=128):
+    """
+    Upsample moment maps to meet minimum spatial size requirement.
+    
+    For small clouds (<128x128), this increases spatial sampling by interpolation.
+    Uses bilinear interpolation to preserve smoothness.
+    Also check for clouds too small
+    
+    Args:
+        moment0, moment1, moment2: Moment maps
+        emission_mask: Boolean emission mask
+        target_size: Minimum size required (default 128)
+    
+    Returns:
+        Upsampled moment0, moment1, moment2, emission_mask
+    """
+    ny, nx = moment0.shape
+    current_size = min(ny, nx)
+    
+    # Check if upsampling needed
+    if current_size >= target_size:
+        print(f"Spatial size {current_size} >= {target_size}, no upsampling needed")
+        return moment0, moment1, moment2, emission_mask
+    
+    # Calculate upsample factor to reach target_size
+    upsample_factor = np.ceil(target_size / current_size)
+    if upsample_factor > 5.0:
+        print(f"Spatial size {current_size} too small, upsampling factor {upsample_factor} > 5.0, not upsampling.")
+        return moment0, moment1, moment2, emission_mask
+    
+    print(f"\nUpsampling moment maps:")
+    print(f"  Original size: {ny} x {nx} (min: {current_size})")
+    print(f"  Upsample factor: {upsample_factor}x")
+    print(f"  Target size: {int(ny * upsample_factor)} x {int(nx * upsample_factor)}")
+    
+    # Upsample each moment map using bilinear interpolation (order=1)
+    # order=1 is bilinear, order=3 is bicubic
+    # Bilinear is smoother and better for physical fields
+    
+    moment0_upsampled = zoom(moment0, upsample_factor, order=1)
+    moment1_upsampled = zoom(moment1, upsample_factor, order=1)
+    moment2_upsampled = zoom(moment2, upsample_factor, order=1)
+    
+    # For emission mask, use nearest neighbor (order=0) to preserve boolean nature
+    emission_mask_upsampled = zoom(emission_mask.astype(float), upsample_factor, order=0).astype(bool)
+    
+    # Verify sizes
+    ny_new, nx_new = moment0_upsampled.shape
+    print(f"  Final size: {ny_new} x {nx_new}")
+    
+    # Sanity check: make sure NaN structure is preserved
+    # In upsampled regions, NaNs might be interpolated - restore them
+    # based on emission mask
+    moment1_upsampled = np.where(emission_mask_upsampled, moment1_upsampled, np.nan)
+    moment2_upsampled = np.where(emission_mask_upsampled, moment2_upsampled, np.nan)
+    
+    return moment0_upsampled, moment1_upsampled, moment2_upsampled, emission_mask_upsampled
 
 def convert_to_column_density(moment0, transition='13CO'):
     """
@@ -305,6 +362,187 @@ def prepare_model_input(moment0, moment1, moment2, emission_mask, target_size=12
     
     return model_input
 
+def prepare_tiled_model_input(moment0, moment1, moment2, emission_mask, 
+                               n_tiles=10, min_coverage=0.10, max_overlap=0.1):
+    """
+    Intelligently sample n_tiles from emission regions using density-based selection.
+    
+    Strategy:
+    1. Find ALL possible 128x128 positions
+    2. Score each by emission density
+    3. Greedily select top n_tiles with controlled overlap
+    
+    Args:
+        moment0, moment1, moment2: Moment maps
+        emission_mask: Boolean mask
+        n_tiles: EXACT number of tiles to extract
+        min_coverage: Minimum fraction of tile with emission (0-1)
+        max_overlap: Maximum allowed overlap between tiles (0-1)
+    
+    Returns:
+        Dict with tiles, positions, and metadata
+    """
+    print(f"\nPreparing {n_tiles} tiles using emission-based sampling...")
+    
+    ny, nx = moment0.shape
+    tile_size = 128
+    
+    # Step 1: Generate ALL possible tile positions and score them
+    print("Scanning for emission-rich regions...")
+    candidates = []
+    
+    # Use smaller stride for finer sampling
+    stride = 32  # Small stride to catch all good positions
+    
+    for y in range(0, ny - tile_size + 1, stride):
+        for x in range(0, nx - tile_size + 1, stride):
+            mask_tile = emission_mask[y:y+tile_size, x:x+tile_size]
+            coverage = mask_tile.sum() / (tile_size * tile_size)
+            
+            if coverage >= min_coverage:
+                # Score by total emission (higher = better)
+                m0_tile = moment0[y:y+tile_size, x:x+tile_size]
+                emission_score = np.nansum(m0_tile * mask_tile)
+                
+                candidates.append({
+                    'position': (y, x),
+                    'coverage': coverage,
+                    'score': emission_score
+                })
+    
+    print(f"Found {len(candidates)} candidate positions")
+    
+    if len(candidates) == 0:
+        raise ValueError(f"No valid tiles found with coverage >= {min_coverage:.1%}")
+    
+    # Step 2: Greedily select n_tiles with overlap control
+    print("Selecting best non-overlapping tiles...")
+    
+    # Sort by score (best first)
+    candidates.sort(key=lambda c: c['score'], reverse=True)
+    
+    selected = []
+    selected_boxes = []  # Track bounding boxes to compute overlap
+    
+    for candidate in candidates:
+        if len(selected) >= n_tiles:
+            break
+        
+        y, x = candidate['position']
+        new_box = (y, x, y + tile_size, x + tile_size)
+        
+        # Check overlap with already selected tiles
+        ok_to_add = True
+        for existing_box in selected_boxes:
+            overlap_frac = compute_overlap(new_box, existing_box, tile_size)
+            if overlap_frac > max_overlap:
+                ok_to_add = False
+                break
+        
+        if ok_to_add:
+            selected.append(candidate)
+            selected_boxes.append(new_box)
+    
+    print(f"Selected {len(selected)} tiles (requested: {n_tiles})")
+    
+    # If we didn't get enough tiles, relax overlap constraint
+    if len(selected) < n_tiles:
+        print(f"Relaxing overlap constraint to get {n_tiles} tiles...")
+        selected = candidates[:n_tiles]
+    
+    # Step 3: Extract and prepare tiles
+    tiles = []
+    positions = []
+    coverages = []
+    scores = []
+    
+    for tile_info in selected:
+        y, x = tile_info['position']
+        
+        # Extract regions
+        m0_tile = moment0[y:y+tile_size, x:x+tile_size]
+        m1_tile = moment1[y:y+tile_size, x:x+tile_size]
+        m2_tile = moment2[y:y+tile_size, x:x+tile_size]
+        
+        # Prepare channels (same as before)
+        moment0_clean = np.nan_to_num(m0_tile, nan=0.0)
+        moment1_clean = np.nan_to_num(m1_tile, nan=0.0)
+        moment2_clean = np.nan_to_num(m2_tile, nan=0.0)
+        
+        channel0 = moment0_clean
+        channel1 = moment1_clean * moment0_clean
+        channel2 = moment2_clean**2
+        
+        model_input = np.stack([channel0, channel1, channel2], axis=0)
+        
+        # Normalize
+        for i in range(3):
+            channel = model_input[i]
+            if np.std(channel) > 0:
+                model_input[i] = (channel - np.mean(channel)) / np.std(channel)
+        
+        tiles.append(model_input)
+        positions.append(tile_info['position'])
+        coverages.append(tile_info['coverage'])
+        scores.append(tile_info['score'])
+    
+    # Convert to arrays
+    tiles = np.array(tiles)
+    positions = np.array(positions)
+    coverages = np.array(coverages)
+    scores = np.array(scores)
+    
+    print(f"\nTiles prepared:")
+    print(f"  Shape: {tiles.shape}")
+    print(f"  Coverage range: [{coverages.min():.1%}, {coverages.max():.1%}]")
+    print(f"  Mean coverage: {coverages.mean():.1%}")
+    
+    # Print tile positions for verification
+    print(f"\nTile positions (y, x):")
+    for i, (pos, cov) in enumerate(zip(positions, coverages)):
+        print(f"  Tile {i+1}: {pos} (coverage: {cov:.1%})")
+    
+    return {
+        'tiles': tiles,
+        'positions': positions,
+        'coverages': coverages,
+        'scores': scores,
+        'original_shape': (ny, nx),
+        'tile_size': tile_size,
+        'n_tiles': len(tiles)
+    }
+
+
+def compute_overlap(box1, box2, tile_size):
+    """
+    Compute overlap fraction between two bounding boxes.
+    
+    Args:
+        box1, box2: (y1, x1, y2, x2) tuples
+        tile_size: Size of tiles for normalization
+    
+    Returns:
+        overlap_fraction: Fraction of box area overlapping (0-1)
+    """
+    y1_1, x1_1, y2_1, x2_1 = box1
+    y1_2, x1_2, y2_2, x2_2 = box2
+    
+    # Find intersection
+    y1_int = max(y1_1, y1_2)
+    x1_int = max(x1_1, x1_2)
+    y2_int = min(y2_1, y2_2)
+    x2_int = min(x2_1, x2_2)
+    
+    # Check if there's any intersection
+    if y2_int <= y1_int or x2_int <= x1_int:
+        return 0.0
+    
+    # Compute overlap area
+    overlap_area = (y2_int - y1_int) * (x2_int - x1_int)
+    tile_area = tile_size * tile_size
+    
+    return overlap_area / tile_area
+
 def visualize_processing_pipeline(moment0, moment1, moment2, model_input, 
                                    emission_mask, output_path='perseus_processing.png'):
     """
@@ -426,16 +664,21 @@ def visualize_processing_pipeline(moment0, moment1, moment2, model_input,
     print(f"\nVisualization saved: {output_path}")
     plt.close()
 
-def process_ppvfits_to_model_input(fits_path, mc_name = 'perseus', output_dir='./perseus_output' , data_format='auto'):
+def process_ppvfits_to_model_input(fits_path, mc_name='perseus', output_dir='./perseus_output', 
+                                   data_format='auto', use_tiling=False, n_tiles=5, min_coverage=0.1, max_overlap=0.1):
     """
-    Complete pipeline
+    Complete pipeline with optional tiling support.
     
     Args:
-        fits_path: Path to FITS file (if None, attempts download)
+        fits_path: Path to FITS file
+        mc_name: Name for output files
         output_dir: Directory for outputs
+        data_format: 'auto', 'perseus', or 'taurus'
+        use_tiling: If True, create tiles instead of single image
+        n_tiles: Number of tiles to create (if use_tiling=True)
     
     Returns:
-        model_input: Array ready for model inference (3, 128, 128)
+        model_input or tile_data depending on use_tiling
     """
     os.makedirs(output_dir, exist_ok=True)
     
@@ -445,37 +688,70 @@ def process_ppvfits_to_model_input(fits_path, mc_name = 'perseus', output_dir='.
     print("Compute Moment Maps")
     moment0, moment1, moment2, emission_mask = compute_moment_maps(data, velocity_axis)
     
-    #Convert to column density (optional, for physical interpretation)
+    ny, nx = moment0.shape
+    if min(ny, nx) < 128:
+        print("Small cloud detected - upsampling moment maps")
+        moment0, moment1, moment2, emission_mask = upsample_moment_maps(
+            moment0, moment1, moment2, emission_mask, target_size=128
+        )
+
     print("Physical Unit Conversion")
     column_density = convert_to_column_density(moment0, transition='13CO')
     
-    print("Prepare Model Input")
-    model_input = prepare_model_input(moment0, moment1, moment2, emission_mask, target_size=128)
+    if use_tiling:
+        print("Prepare Tiled Model Input")
+        tile_data = prepare_tiled_model_input(
+            moment0, moment1, moment2, emission_mask, 
+            n_tiles=n_tiles,  
+            min_coverage=min_coverage,   
+            max_overlap=max_overlap      
+        )
+        
+        # Save tiles
+        output_file = f'{output_dir}/{mc_name}_tiles.npz'
+        np.savez(output_file, **tile_data)
+        print(f"\nTiles saved: {output_file}")
+        
+        # Still save moment maps for reference
+        np.savez(f'{output_dir}/{mc_name}_moments.npz',
+                moment0=moment0, moment1=moment1, moment2=moment2,
+                emission_mask=emission_mask, column_density=column_density,
+                velocity_axis=velocity_axis)
+        print(f"Moment maps saved: {output_dir}/{mc_name}_moments.npz")
+        
+        print("PROCESSING COMPLETE")
+        return tile_data
+    else:
+        print("Prepare Model Input")
+        model_input = prepare_model_input(moment0, moment1, moment2, emission_mask, target_size=128)
+        
+        print("Prepare Model Input")
+        model_input = prepare_model_input(moment0, moment1, moment2, emission_mask, target_size=128)
+        
+        print("Visualization")
+        visualize_processing_pipeline(moment0, moment1, moment2, model_input, 
+                                    emission_mask, 
+                                    output_path=f'{output_dir}/{mc_name}_processing.png')
+        
+        #Save outputs
+        output_file = f'{output_dir}/{mc_name}_model_input.npy'
+        np.save(output_file, model_input)
+        print(f"\nModel input saved: {output_file}")
+        
+        # Save moment maps for reference
+        np.savez(f'{output_dir}/{mc_name}_moments.npz',
+                moment0=moment0, moment1=moment1, moment2=moment2,
+                emission_mask=emission_mask, column_density=column_density,
+                velocity_axis=velocity_axis)
+        print(f"Moment maps saved: {output_dir}/{mc_name}_moments.npz")
+        
+        print("PROCESSING COMPLETE")
+        print(f"\nReady for model inference:")
+        print(f"  model_input.shape = {model_input.shape}")
+        print(f"  Load with: data = np.load('{output_file}')")
+        print(f"  Convert to tensor: torch.from_numpy(data).unsqueeze(0).float()")
     
-    print("Visualization")
-    visualize_processing_pipeline(moment0, moment1, moment2, model_input, 
-                                  emission_mask, 
-                                  output_path=f'{output_dir}/{mc_name}_processing.png')
-    
-    #Save outputs
-    output_file = f'{output_dir}/{mc_name}_model_input.npy'
-    np.save(output_file, model_input)
-    print(f"\nModel input saved: {output_file}")
-    
-    # Save moment maps for reference
-    np.savez(f'{output_dir}/{mc_name}_moments.npz',
-            moment0=moment0, moment1=moment1, moment2=moment2,
-            emission_mask=emission_mask, column_density=column_density,
-            velocity_axis=velocity_axis)
-    print(f"Moment maps saved: {output_dir}/{mc_name}_moments.npz")
-    
-    print("PROCESSING COMPLETE")
-    print(f"\nReady for model inference:")
-    print(f"  model_input.shape = {model_input.shape}")
-    print(f"  Load with: data = np.load('{output_file}')")
-    print(f"  Convert to tensor: torch.from_numpy(data).unsqueeze(0).float()")
-    
-    return model_input
+        return model_input
 
 
 if __name__ == "__main__":
@@ -485,20 +761,28 @@ if __name__ == "__main__":
     PERSEUS_13CO_PPV_PATH = PERSEUS_13CO_PATH + 'PerA_13coFCRAO_F_xyv.fits.gz'
 
     PERSEUS_CENTER = SkyCoord('03h37m00s', '+31d49m00s', frame='icrs')
-    PERSEUS_SIZE = 6.0 * u.degree  # Approximate extent of PERSEUS
-    OUTPUT_SIZE = 128  # Match training data resolution
+    PERSEUS_SIZE = 6.0 * u.degree
+    OUTPUT_SIZE = 128
 
     TAURUS_13CO_PATH = '../data/taurus_mc/'
     TAURUS_13CO_MOMENT_PATH = TAURUS_13CO_PATH + 'DHT21_Taurus_mom.fits'
     TAURUS_13CO_PPV_PATH = TAURUS_13CO_PATH + 'DHT21_Taurus_interp.fits'
 
+    SERPENS_13CO_PATH = '../data/serpens_mc/'
+    SERPENS_13CO_PPV_PATH = SERPENS_13CO_PATH + 'serpens_13co_xyv.fit.gz'#'13co10.fits'
+
+    ORION_13CO_PATH = '../data/orion_mc/'
+    ORION_13CO_PPV_PATH = ORION_13CO_PATH + 'Fig3a.fits.gz'
+
+    OPH_13CO_PATH = '../data/ophiucus_mc/'
+    OPH_13CO_PPV_PATH = OPH_13CO_PATH + 'OphA_13coFCRAO_F_xyv.fits.gz'
     # Physical constants
     M_H2 = 2.8 * u.Da  # Mean molecular weight including He
     K_B = 1.380649e-23 * u.J / u.K
-    model_input = process_ppvfits_to_model_input(
-        fits_path=TAURUS_13CO_PPV_PATH, 
-        mc_name='taurus',
-        output_dir=TAURUS_13CO_PATH,
-        data_format='auto'
-    )
+    # Process with tiling
+    #tile_data = process_ppvfits_to_model_input(fits_path=PERSEUS_13CO_PATH, mc_name='perseus',output_dir=PERSEUS_13CO_PATH,data_format='auto',use_tiling=True,n_tiles=6,min_coverage=0.1, max_overlap=0.1)
+    #tile_data = process_ppvfits_to_model_input(fits_path=TAURUS_13CO_PPV_PATH, mc_name='taurus',output_dir=TAURUS_13CO_PATH,data_format='auto',use_tiling=True,n_tiles=2,min_coverage=0, max_overlap=0)
+    #tile_data = process_ppvfits_to_model_input(fits_path=SERPENS_13CO_PPV_PATH, mc_name='serpens',output_dir=SERPENS_13CO_PATH,data_format='auto',use_tiling=False,n_tiles=4,min_coverage=0, max_overlap=0)
+    #tile_data = process_ppvfits_to_model_input(fits_path=ORION_13CO_PPV_PATH, mc_name='orion',output_dir=ORION_13CO_PATH,data_format='auto',use_tiling=True,n_tiles=4,min_coverage=0, max_overlap=0)
+    tile_data = process_ppvfits_to_model_input(fits_path=OPH_13CO_PPV_PATH, mc_name='ophiucus',output_dir=OPH_13CO_PATH,data_format='auto',use_tiling=True,n_tiles=4,min_coverage=0, max_overlap=0)
     

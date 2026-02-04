@@ -280,77 +280,265 @@ def compare_models(data_tensor, models_dict):
     
     return results
 
+def visualize_tiled_predictions(tiles, predictions, uncertainties, positions,
+                                original_shape, coverages, moments_file,
+                                output_path='tiled_prediction.png'):
+    """
+    Create collage visualization with predictions overlaid.
+    """
+    fig = plt.figure(figsize=(20, 12))
+    gs = fig.add_gridspec(2, 2, height_ratios=[3, 1], width_ratios=[3, 1],
+                         hspace=0.3, wspace=0.3)
+    
+    # Main collage plot
+    ax_main = fig.add_subplot(gs[0, 0])
+    
+    # Create reconstruction canvas
+    # Load background image
+    ny, nx = original_shape
+    moments_data = np.load(moments_file)
+    background = moments_data['moment0']  # Use moment0 as background
 
+    # Normalize background for display
+    background_display = background.copy()
+    background_display = np.nan_to_num(background_display, nan=0.0)
 
-def main(MC_PATH, MC_MODEL_INPUT, obs_name = 'Perseus'):
-    print("Load Processed MC Data")
-    data_tensor = load_processed_MC_data(MC_MODEL_INPUT)
-    compare_models = 0
-    model_name = '9005'
-    if compare_models:
-        #Load multiple models for comparison
-        print("Load Multiple Models")
+    # Show background
+    im_bg = ax_main.imshow(background_display, origin='lower', cmap='viridis')
+
+    # Overlay tile predictions
+    canvas_overlay = np.full((ny, nx), np.nan)
+    for (y, x), pred in zip(positions, predictions):
+        canvas_overlay[y:y+128, x:x+128] = pred
+        # Add prediction text in center
+        cx, cy = x + 64, y + 64
+        ax_main.text(cx, cy, f'{pred:.1f}', 
+                    ha='center', va='center', fontsize=10, 
+                    fontweight='bold', color='white',
+                    bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+
+    im = ax_main.imshow(canvas_overlay, origin='lower', cmap='plasma', 
+                    vmin=predictions.min(), vmax=predictions.max(),
+                    alpha=0.8)  # Semi-transparent overlay
+    ax_main.set_title(f'Mach Number Map ({len(predictions)} tiles)', 
+                     fontsize=14, fontweight='bold')
+    ax_main.set_xlabel('X [pixels]')
+    ax_main.set_ylabel('Y [pixels]')
+    plt.colorbar(im, ax=ax_main, label='Mach Number')
+    
+    # Histogram of predictions
+    ax_hist = fig.add_subplot(gs[0, 1])
+    ax_hist.hist(predictions, bins=15, alpha=0.7, edgecolor='black')
+    ax_hist.axvline(predictions.mean(), color='red', linestyle='--', 
+                   linewidth=2, label=f'Mean: {predictions.mean():.2f}')
+    ax_hist.axvline(np.median(predictions), color='blue', linestyle='--',
+                   linewidth=2, label=f'Median: {np.median(predictions):.2f}')
+    ax_hist.set_xlabel('Mach Number')
+    ax_hist.set_ylabel('Count')
+    ax_hist.set_title('Distribution')
+    ax_hist.legend()
+    ax_hist.grid(alpha=0.3)
+    
+    # Table of predictions
+    ax_table = fig.add_subplot(gs[1, :])
+    ax_table.axis('off')
+    
+    # Prepare table data
+    table_data = []
+    table_data.append(['Tile', 'Mach #', 'Uncert.', 'Coverage', 'Position'])
+    for i, (pred, unc, cov, pos) in enumerate(zip(predictions, uncertainties, 
+                                                   coverages, positions)):
+        table_data.append([
+            f'{i+1}',
+            f'{pred:.2f}',
+            f'±{unc:.2f}',
+            f'{cov:.1%}',
+            f'({pos[0]}, {pos[1]})'
+        ])
+    
+    # Add summary row
+    table_data.append(['', '', '', '', ''])
+    table_data.append([
+        'SUMMARY',
+        f'{predictions.mean():.2f}',
+        f'±{predictions.std():.2f}',
+        '',
+        f'Range: [{predictions.min():.2f}, {predictions.max():.2f}]'
+    ])
+    
+    table = ax_table.table(cellText=table_data, cellLoc='center',
+                          loc='center', bbox=[0, 0, 1, 1])
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 2)
+    
+    # Style header row
+    for i in range(5):
+        table[(0, i)].set_facecolor('#4CAF50')
+        table[(0, i)].set_text_props(weight='bold', color='white')
+    
+    # Style summary rows
+    for i in range(5):
+        table[(len(table_data)-2, i)].set_facecolor('#E0E0E0')
+        table[(len(table_data)-1, i)].set_facecolor('#FFC107')
+        table[(len(table_data)-1, i)].set_text_props(weight='bold')
+    
+    fig.suptitle('Tiled Mach Number Prediction Analysis', 
+                fontsize=16, fontweight='bold')
+    
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"\nVisualization saved: {output_path}")
+    plt.close()
+
+def main(MC_PATH, MC_MODEL_INPUT, obs_name='Perseus', is_tiled=False):
+    
+    if is_tiled:
+        # Load tiled data
+        print("Loading tiled data...")
+        tile_file = MC_MODEL_INPUT.replace('_model_input.npy', '_tiles.npz')
+        tile_data = np.load(tile_file)
         
-        models_dict = {}
+        tiles = tile_data['tiles']  # (N, 3, 128, 128)
+        positions = tile_data['positions']
+        coverages = tile_data['coverages']
+        original_shape = tuple(tile_data['original_shape'])
         
-        # Try to load different model versions
-        model_paths = {
-            'Net9004 (Hybrid CNN-ViT)': './models/test9004.pth',
-            'Net9005 (With Uncertainty)': './models/test9005.pth',
-        }
+        print(f"Loaded {len(tiles)} tiles")
         
-        for name, path in model_paths.items():
-            if os.path.exists(path):
-                model_type = 'net9005' if '9005' in path else 'net9004'
-                try:
-                    model, has_unc = load_trained_model(path, model_type)
-                    models_dict[name] = (model, has_unc)
-                except Exception as e:
-                    print(f"Could not load {name}: {e}")
+        # Load model
+        print("Load Model")
+        model, has_uncertainty = load_trained_model(model_path='./models/test9005.pth', 
+                                                     model_type='net9005')
         
-        #Run comparison
-        print("STEP 3: Model Comparison")
-        results = compare_models(data_tensor, models_dict)
+        # Batch inference
+        print("Running batch inference...")
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        tiles_tensor = torch.from_numpy(tiles).float().to(device)
         
-        #Use best model (with uncertainty if available)
-        best_model_name = list(models_dict.keys())[0]
-        model, has_uncertainty = models_dict[best_model_name]
-        mean_ms, std_ms = results[best_model_name]
+        predictions = []
+        uncertainties = []
+        
+        with torch.no_grad():
+            # Process in batches to avoid memory issues
+            batch_size = 4
+            for i in range(0, len(tiles), batch_size):
+                batch = tiles_tensor[i:i+batch_size]
+                output = model(batch)
+                
+                if has_uncertainty:
+                    mean, logvar = output
+                    mean = mean.cpu().numpy().flatten()
+                    std = torch.exp(0.5 * logvar).cpu().numpy().flatten()
+                    predictions.extend(mean)
+                    uncertainties.extend(std)
+                else:
+                    mean = output.cpu().numpy().flatten()
+                    predictions.extend(mean)
+                    uncertainties.extend([0.0] * len(mean))
+        
+        predictions = np.array(predictions)
+        uncertainties = np.array(uncertainties)
+        
+        print(f"\nPredictions:")
+        for i, (pred, unc) in enumerate(zip(predictions, uncertainties)):
+            print(f"  Tile {i+1}: Ms = {pred:.2f} ± {unc:.2f}")
+        
+        print(f"\nOverall statistics:")
+        print(f"  Mean: {predictions.mean():.2f} ± {predictions.std():.2f}")
+        print(f"  Median: {np.median(predictions):.2f}")
+        print(f"  Range: [{predictions.min():.2f}, {predictions.max():.2f}]")
+        
+        # Visualize
+        moments_file = f'{MC_PATH}/{obs_name}_moments.npz'
+        visualize_tiled_predictions(tiles, predictions, uncertainties, positions,
+                                    original_shape, coverages, moments_file,
+                                    output_path=f'{MC_PATH}/{obs_name}_tiled_prediction.png')
+        
+        # Save results
+        results_file = f'{MC_PATH}/{obs_name}_tiled_results.txt'
+        with open(results_file, 'w') as f:
+            f.write(f"{obs_name.upper()} - TILED MACH NUMBER PREDICTIONS\n")
+            f.write("="*60 + "\n\n")
+            f.write(f"Number of tiles: {len(predictions)}\n")
+            f.write(f"Mean Mach number: {predictions.mean():.2f} ± {predictions.std():.2f}\n")
+            f.write(f"Median: {np.median(predictions):.2f}\n")
+            f.write(f"Range: [{predictions.min():.2f}, {predictions.max():.2f}]\n\n")
+            f.write("Individual tile predictions:\n")
+            f.write("-"*60 + "\n")
+            for i, (pred, unc, cov) in enumerate(zip(predictions, uncertainties, coverages)):
+                f.write(f"Tile {i+1:2d}: Ms = {pred:5.2f} ± {unc:4.2f}  (coverage: {cov:.1%})\n")
+        
+        print(f"\nResults saved: {results_file}")
         
     else:
-        #Load single model
-        print("Load Model")
-        model, has_uncertainty = load_trained_model(model_path = f'./models/test{model_name}.pth', model_type=f'net{model_name}')
-        
-        print("Predict Mach Number")
-        mean_ms, std_ms = predict_MC_mach_number(data_tensor, model, has_uncertainty)
-    
-
-    print("Visualize Results")
-    data_np = np.load(MC_MODEL_INPUT)
-    visualize_MC_with_prediction(data_np, mean_ms, std_ms,
-                                     output_path=f'{MC_PATH}/{obs_name}_prediction.png')
-    
-    results_file = f'{MC_PATH}/{obs_name}_results.txt'
-    with open(results_file, 'w') as f:
-        f.write("MOLECULAR CLOUD - MACH NUMBER PREDICTION\n")
-        
-        if std_ms is not None:
-            f.write(f"Predicted Sonic Mach Number: {mean_ms:.2f} ± {std_ms:.2f}\n\n")
-            f.write(f"68% Confidence Interval: [{mean_ms - std_ms:.2f}, {mean_ms + std_ms:.2f}]\n")
-            f.write(f"95% Confidence Interval: [{mean_ms - 2*std_ms:.2f}, {mean_ms + 2*std_ms:.2f}]\n")
+        print("Load Processed MC Data")
+        data_tensor = load_processed_MC_data(MC_MODEL_INPUT)
+        compare_models = 0
+        model_name = '9005'
+        if compare_models:
+            #Load multiple models for comparison
+            print("Load Multiple Models")
+            
+            models_dict = {}
+            
+            # Try to load different model versions
+            model_paths = {
+                'Net9004 (Hybrid CNN-ViT)': './models/test9004.pth',
+                'Net9005 (With Uncertainty)': './models/test9005.pth',
+            }
+            
+            for name, path in model_paths.items():
+                if os.path.exists(path):
+                    model_type = 'net9005' if '9005' in path else 'net9004'
+                    try:
+                        model, has_unc = load_trained_model(path, model_type)
+                        models_dict[name] = (model, has_unc)
+                    except Exception as e:
+                        print(f"Could not load {name}: {e}")
+            
+            #Run comparison
+            print("STEP 3: Model Comparison")
+            results = compare_models(data_tensor, models_dict)
+            
+            #Use best model (with uncertainty if available)
+            best_model_name = list(models_dict.keys())[0]
+            model, has_uncertainty = models_dict[best_model_name]
+            mean_ms, std_ms = results[best_model_name]
+            
         else:
-            f.write(f"Predicted Sonic Mach Number: {mean_ms:.2f}\n")
+            #Load single model
+            print("Load Model")
+            model, has_uncertainty = load_trained_model(model_path = f'./models/test{model_name}.pth', model_type=f'net{model_name}')
+            
+            print("Predict Mach Number")
+            mean_ms, std_ms = predict_MC_mach_number(data_tensor, model, has_uncertainty)
         
-        f.write(f"\nModel: net{model_name}\n")
-        f.write(f"Model Path: ./models/test{model_name}.pth\n")
-        f.write(f"Data Path: {PERSEUS_13CO_MODEL_INPUT}\n")
-    
-    print(f"\nResults saved: {results_file}")
-    
-    print("INFERENCE COMPLETE")
-    print(f"\nPredicted Mach number for Perseus: Ms = {mean_ms:.2f}" + 
-          (f" ± {std_ms:.2f}" if std_ms is not None else ""))
+
+        print("Visualize Results")
+        data_np = np.load(MC_MODEL_INPUT)
+        visualize_MC_with_prediction(data_np, mean_ms, std_ms,
+                                        output_path=f'{MC_PATH}/{obs_name}_prediction.png')
+        
+        results_file = f'{MC_PATH}/{obs_name}_results.txt'
+        with open(results_file, 'w') as f:
+            f.write("MOLECULAR CLOUD - MACH NUMBER PREDICTION\n")
+            
+            if std_ms is not None:
+                f.write(f"Predicted Sonic Mach Number: {mean_ms:.2f} ± {std_ms:.2f}\n\n")
+                f.write(f"68% Confidence Interval: [{mean_ms - std_ms:.2f}, {mean_ms + std_ms:.2f}]\n")
+                f.write(f"95% Confidence Interval: [{mean_ms - 2*std_ms:.2f}, {mean_ms + 2*std_ms:.2f}]\n")
+            else:
+                f.write(f"Predicted Sonic Mach Number: {mean_ms:.2f}\n")
+            
+            f.write(f"\nModel: net{model_name}\n")
+            f.write(f"Model Path: ./models/test{model_name}.pth\n")
+            f.write(f"Data Path: {MC_MODEL_INPUT}\n")
+        
+        print(f"\nResults saved: {results_file}")
+        
+        print("INFERENCE COMPLETE")
+        print(f"\nPredicted Mach number for {obs_name}: Ms = {mean_ms:.2f}" + 
+            (f" ± {std_ms:.2f}" if std_ms is not None else ""))
 
 
 if __name__ == "__main__":
@@ -364,4 +552,16 @@ if __name__ == "__main__":
     TAURUS_13CO_PPV_PATH = TAURUS_13CO_PATH + 'DHT21_Taurus_interp.fits'
     TAURUS_13CO_MODEL_INPUT = TAURUS_13CO_PATH + 'taurus_model_input.npy'
 
-    main(TAURUS_13CO_PATH, TAURUS_13CO_MODEL_INPUT, obs_name='taurus')
+    SERPENS_13CO_PATH = '../data/serpens_mc/'
+    SERPENS_13CO_MODEL_INPUT = SERPENS_13CO_PATH + 'serpens_model_input.npy'
+
+    ORION_13CO_PATH = '../data/orion_mc/'
+    ORION_13CO_MODEL_INPUT = ORION_13CO_PATH + 'orion_model_input.npy'
+
+    OPH_13CO_PATH = '../data/ophiucus_mc/'
+    OPH_13CO_MODEL_INPUT = OPH_13CO_PATH + 'ophiucus_model_input.npy'
+
+    #main(PERSEUS_13CO_PATH, PERSEUS_13CO_MODEL_INPUT, obs_name='perseus', is_tiled=True)
+    #main(TAURUS_13CO_PATH, TAURUS_13CO_MODEL_INPUT, obs_name='taurus', is_tiled=True)
+    #main(SERPENS_13CO_PATH, SERPENS_13CO_MODEL_INPUT, obs_name='serpens', is_tiled=False)
+    main(OPH_13CO_PATH, OPH_13CO_MODEL_INPUT, obs_name='ophiucus', is_tiled=True)
