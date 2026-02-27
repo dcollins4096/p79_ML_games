@@ -18,8 +18,8 @@ reload(loader)
 reload(torch_power)
 
 new_model   = 1
-load_model  = 0
-train_model = 1
+load_model  = 1
+train_model = 0
 save_model = 1
 plot_models = 1
 
@@ -27,7 +27,7 @@ def nparam(model):
     return sum( param.numel() for param in model.parameters() if param.requires_grad)
 
 if new_model:
-    import networks.net4004  as net
+    import networks.net0184  as net
     reload(net)
     all_data = net.load_data()
     model = net.thisnet()
