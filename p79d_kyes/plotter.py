@@ -338,7 +338,7 @@ def plot1(net_name,model, all_data, suffix = "", subset = 'test', erronly=True):
         print('hey')
         ds_train = net.SphericalDataset(all_data['train'].to('cpu'))
         ds_val   = net.SphericalDataset(all_data['valid'].to('cpu'))
-        ds_tst   = net.SphericalDataset(all_data['test'][:1000].to('cpu'))
+        ds_tst   = net.SphericalDataset(all_data['test'].to('cpu'))
 
     train_loader = DataLoader(ds_train, batch_size=1, shuffle=False, drop_last=False)
     val_loader   = DataLoader(ds_val,   batch_size=1, shuffle=False, drop_last=False)
