@@ -11,18 +11,18 @@ import time
 import loader
 import matplotlib as mpl
 sys.path.append('/home/dcollins/repos/')
-import dtools_global.vis.pcolormesh_helper as pch
+import dtools.vis.pcolormesh_helper as pch
 from scipy.stats import pearsonr
 import tqdm
 import torch_power
 from torch.utils.data import Dataset, DataLoader
 from collections import defaultdict
 from matplotlib.lines import Line2D
-import dtools_global.math.power_spectrum as ps
+import dtools.math.power_spectrum as ps
 
 import networks.net0699 as net99
 
-net_list = [184,607,605, 608]
+net_list = [184,607,609, 610]
 
 def compute_losses(model,all_data, suite='test'):
     this_set = loaders[suite]
