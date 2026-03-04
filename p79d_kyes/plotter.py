@@ -11,13 +11,13 @@ import matplotlib.pyplot as plt
 import time
 import loader
 import matplotlib as mpl
-import dtools_global.vis.pcolormesh_helper as pch
+import dtools.vis.pcolormesh_helper as pch
 from scipy.stats import pearsonr
 import tqdm
 import torch_power
 from collections import defaultdict
-#import hotness
 from torch.utils.data import Dataset, DataLoader
+import dtools.math.power_spectrum as ps
 
 
 def plot_three_flow(Eguess,Etarget,E_samples,fig=None,axs=None, title='', floating=False):
@@ -249,7 +249,6 @@ def plot_three(Eguess,Etarget,fig=None,axs=None, title='', floating=False, losse
     pch.simple_phase(E1,E2,ax=axs[2])#, colorbar=False)
     axs[2].plot( [Emin,Emax],[Emin,Emax],c='k')
     axs[2].set(xlabel='Actual pixel value',ylabel='Predicted')
-    import dtools_global.math.power_spectrum as ps
     if len(axs)>=4:
         #power_guess = torch_power.powerspectrum(Eguess)
         #power_target = torch_power.powerspectrum(Etarget)
@@ -330,28 +329,17 @@ def plot1(net_name,model, all_data, suffix = "", subset = 'test', erronly=True):
 
     plot_loss_curve(net_name, model, suffix)
 
-    if hasattr(model, "predict_scalars"):
-        ds_train = net.SphericalDataset(all_data['train'].to('cpu'), all_data['quantities']['train'])
-        ds_val   = net.SphericalDataset(all_data['valid'].to('cpu'), all_data['quantities']['valid'])
-        ds_tst   = net.SphericalDataset(all_data['test'].to('cpu'), all_data['quantities']['test'])
-    else:
-        print('hey')
-        ds_train = net.SphericalDataset(all_data['train'].to('cpu'))
-        ds_val   = net.SphericalDataset(all_data['valid'].to('cpu'))
-        ds_tst   = net.SphericalDataset(all_data['test'].to('cpu'))
+    ds_train = net.SphericalDataset(all_data['train'].to('cpu'))
+    ds_val   = net.SphericalDataset(all_data['valid'].to('cpu'))
+    ds_tst   = net.SphericalDataset(all_data['test'].to('cpu'))
 
     train_loader = DataLoader(ds_train, batch_size=1, shuffle=False, drop_last=False)
     val_loader   = DataLoader(ds_val,   batch_size=1, shuffle=False, drop_last=False)
     tst_loader   = DataLoader(ds_tst,   batch_size=1, shuffle=False, drop_last=False)
                                 
-
-    #ds_val = None
-    #ds_tst = None
-    device = 'cuda'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = model.to(device)
 
-    #this_set = ds_val
-    #subset = 'train'
     if subset == 'test':
         this_set = tst_loader
         dataset = ds_tst
@@ -366,7 +354,7 @@ def plot1(net_name,model, all_data, suffix = "", subset = 'test', erronly=True):
         subs = ['valid']
 
     Nsamples=10
-    print('Subset',subset, 'nsamples',Nsamples)
+    print('Compute losses on %s'%subset)
     error_list = defaultdict(list)
     loss_dicts = []
     sort_by_err=False
@@ -396,11 +384,12 @@ def plot1(net_name,model, all_data, suffix = "", subset = 'test', erronly=True):
         fig.savefig('%s/plots/%s_%s_%s_errors.png'%(os.environ['HOME'],net_name,suffix,subset))
 
 
+    sortby = 'total'
+    print("Plot losses sorted by",sortby)
     for ns,subset in enumerate(subs):
         mmin=20
         mmax=-20
         if sort_by_err:
-            sortby = 'total'
             print('sort by %s'%sortby)
             if subset == 'test':
                 ppp = np.argsort(error_list[sortby])
@@ -419,7 +408,8 @@ def plot1(net_name,model, all_data, suffix = "", subset = 'test', erronly=True):
             #dothese=range(len(this_set))
         else:
             dothese = [0,1]
-        print("DO", dothese)
+        print("DO these", dothese)
+        print("Losses: ",sortby)
         print( np.array(error_list[sortby])[dothese])
 
         with torch.no_grad():
@@ -441,7 +431,6 @@ def plot1(net_name,model, all_data, suffix = "", subset = 'test', erronly=True):
                 EB = yb[0].squeeze(0)
                 EBguess = moo[0][0]
                 this_loss = loss_dicts[n]
-                print("Loss", sum(this_loss.values()))
                 #this_loss = model.criterion1(moo,yb)
 
                 if EB_samples is not None:
@@ -476,7 +465,6 @@ def plot1(net_name,model, all_data, suffix = "", subset = 'test', erronly=True):
                     fig.tight_layout()
                     outname='%s/plots/%s_%s_%s_%04d.png'%(os.environ['HOME'],net_name,suffix,subset,nplot)
                     fig.savefig(outname)
-                    print(outname)
                     plt.close(fig)
 
     return model

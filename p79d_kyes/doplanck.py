@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import time
 import loader
 import matplotlib as mpl
-import dtools_global.vis.pcolormesh_helper as pch
+import dtools.vis.pcolormesh_helper as pch
 from scipy.stats import pearsonr
 import tqdm
 import torch_power
