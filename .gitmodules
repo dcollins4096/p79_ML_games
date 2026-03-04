@@ -1,0 +1,3 @@
+[submodule "p79d_kyes/dtools"]
+	path = p79d_kyes/dtools
+	url = git@github.com:dcollins4096/dtools.git
