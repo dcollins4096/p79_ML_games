@@ -25,8 +25,8 @@ what = "from net0184.  Take 1 at dcf"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
-fname_train = "p79d_subsets_S128_N1_xyz_suite7_tvsquh_half_2_first.h5"
-fname_valid = "p79d_subsets_S128_N1_xyz_suite7_tvsquh_half_2_second.h5"
+fname_train = "p79d_subsets_S128_N1_xyz_suite7_tvsquh_half_first.h5"
+fname_valid = "p79d_subsets_S128_N1_xyz_suite7_tvsquh_half_second.h5"
 #ntrain = 2000
 #ntrain = 1000 #ntrain = 600
 #ntrain = 20
@@ -59,7 +59,7 @@ def load_data():
 
 def thisnet():
 
-    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, out_channels=3, use_cross_attention=False, attn_heads=1)
+    model = main_net(base_channels=32,fc_hidden=2048 , fc_spatial=4, use_fc_bottleneck=fc_bottleneck, use_cross_attention=False, attn_heads=1)
 
     model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -108,7 +108,7 @@ class SphericalDataset(Dataset):
             angle = random.uniform(-90,90)
             theset = TF.rotate(theset,angle)
 
-        return theset[0:-1], theset[-1]
+        return theset[0:-1], theset[-1:]
 
 # ---------------------------
 # Utils
@@ -287,10 +287,8 @@ def power_spectrum_delta(guess,target):
     return output
 
 def power_spectra_crit(guess,target):
-    err_T = power_spectrum_delta(guess[:,0:1,:,:], target[:,0:1,:,:])
-    err_E = power_spectrum_delta(guess[:,1:2,:,:], target[:,1:2,:,:])
-    err_B = power_spectrum_delta(guess[:,2:3,:,:], target[:,2:3,:,:])
-    return err_T+err_E+err_B
+    err_T = power_spectrum_delta(guess[:,0:1,:,:], target)
+    return err_T
 
 def cross_spectrum_delta(guess,target):
     T_guess = torch_power.crossspectrum(guess, target)
@@ -663,32 +661,20 @@ class main_net(nn.Module):
 
         # Weighted sum (more weight on full-res output)
         if self.err_SSIM > 0:
-            ssim_t  = ssim_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-            ssim_e  = ssim_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            ssim_b  = ssim_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            lambda_ssim = self.err_SSIM*(ssim_e+ssim_b+ssim_t)/3
+            ssim_t  = ssim_loss(out_main[:,0:1,:,:], target)
+            lambda_ssim = self.err_SSIM*(ssim_t)
             all_loss['SSIM']=lambda_ssim
         if self.err_Grad > 0:
-            grad_t  = gradient_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-            grad_e  = gradient_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            grad_b  = gradient_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            lambda_grad = self.err_Grad*(grad_e+grad_b+grad_t)/3
+            grad_t  = gradient_loss(out_main[:,0:1,:,:], target)
+            lambda_grad = self.err_Grad*(grad_t)
             all_loss['Grad']=lambda_grad
         if self.err_Pear > 0:
-            pear_t  = pearson_loss(out_main[:,0:1,:,:], target[:,0:1,:,:])
-            pear_e  = pearson_loss(out_main[:,1:2,:,:], target[:,1:2,:,:])
-            pear_b  = pearson_loss(out_main[:,2:3,:,:], target[:,2:3,:,:])
-            lambda_pear = self.err_Pear*(pear_e+pear_b+pear_t)/3
+            pear_t  = pearson_loss(out_main[:,0:1,:,:], target)
+            lambda_pear = self.err_Pear*(pear_t)
             all_loss['Pear']=lambda_pear
         if self.err_Power > 0:
             lambda_power = self.err_Power*power_spectra_crit(out_main, target)
             all_loss['Power'] = lambda_power
-        if self.err_Cross > 0:
-            lambda_cross = self.err_Cross*cross_spectra_crit(out_main, target)
-            all_loss['Cross'] = lambda_cross
-        if self.err_Bisp > 0:
-            lambda_bisp = self.err_Bisp*bispectrum_crit(out_main,target)
-            all_loss['Bisp'] = lambda_bisp
 
         return all_loss
 

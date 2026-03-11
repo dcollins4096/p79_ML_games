@@ -1,0 +1,451 @@
+
+import torch.nn.functional as F
+from importlib import reload
+import importlib
+import sys
+import os
+import torch
+import pdb
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+import loader
+import matplotlib as mpl
+import dtools.vis.pcolormesh_helper as pch
+from scipy.stats import pearsonr
+import tqdm
+import torch_power
+from collections import defaultdict
+from torch.utils.data import Dataset, DataLoader
+import dtools.math.power_spectrum as ps
+
+
+def plot_three_flow(Eguess,Etarget,E_samples,fig=None,axs=None, title='', floating=False):
+    if hasattr(Eguess, 'cpu'):
+        Eguess=Eguess.cpu()
+    if hasattr(Etarget,'cpu'):
+        Etarget=Etarget.cpu()
+    Emin = min([Etarget.min(), Eguess.min()])
+    Emax = max([Etarget.max(), Eguess.max()])
+    #Enorm = mpl.colors.Normalize(vmin=-1,vmax=1)
+    Enorm = mpl.colors.Normalize(vmin=Emin,vmax=Emax)
+    #Enorm = None
+
+    ppp=axs[0].imshow(Etarget,norm=Enorm)
+    fig.colorbar(ppp,ax=axs[0])
+    axs[0].set(title='%s actual'%title, xlabel='x [pixel]', ylabel = 'y [pixel]')
+
+    ppp=axs[1].imshow(Eguess,norm=Enorm)
+    fig.colorbar(ppp,ax=axs[1])
+    #L2 = (((Etarget-Eguess)**2).mean())**0.5/Etarget.mean()
+    L2 = F.mse_loss(Etarget,Eguess)
+    axs[1].set(title='%s predict %0.2e'%(title,L2), xlabel='x [pixel]', ylabel = 'y [pixel]')
+
+    mean = E_samples.mean(axis=0)
+    std  = E_samples.std(axis=0)
+    #mean = E_samples[0,...]
+    #std  = E_samples[1,...]
+    ppp=axs[2].imshow(mean.cpu().detach().numpy(), norm=Enorm)
+    L2 = (((Etarget-mean.cpu())**2).mean())**0.5/Etarget.mean()
+    axs[2].set(title='%s NF mean %0.2e'%(title,L2), xlabel='x [pixel]', ylabel = 'y [pixel]')
+    fig.colorbar(ppp,ax=axs[2])
+    ppp=axs[3].imshow(std.cpu().detach().numpy(), norm=None)
+    fig.colorbar(ppp,ax=axs[3])
+
+    E1 = Etarget.flatten()
+    E2 = Eguess.flatten()
+    pch.simple_phase(E1,E2,ax=axs[4], colorbar=False)
+    axs[4].plot( [Emin,Emax],[Emin,Emax],c='k')
+
+
+def plot_three_err(Eguess,Etarget,var,out_prob,mean,model,fig=None,axs=None, title='', floating=False):
+    if hasattr(Eguess, 'cpu'):
+        Eguess=Eguess.cpu()
+    if hasattr(Etarget,'cpu'):
+        Etarget=Etarget.cpu()
+    Emin = min([Etarget.min(), Eguess.min()])
+    Emax = max([Etarget.max(), Eguess.max()])
+    if not floating:
+        #Enorm = mpl.colors.Normalize(vmin=Emin,vmax=Emax)
+        Enorm = mpl.colors.SymLogNorm(1.0,vmin=Emin,vmax=Emax)
+    else:
+        raise
+        Enorm = None
+    Enorm = mpl.colors.Normalize(vmin=-1,vmax=1)
+    ppp=axs[0].imshow(Etarget,norm=Enorm)
+    fig.colorbar(ppp,ax=axs[0])
+    axs[0].set(title='%s actual'%title, xlabel='x [pixel]', ylabel = 'y [pixel]')
+    ppp=axs[1].imshow(Eguess,norm=Enorm)
+    fig.colorbar(ppp,ax=axs[1])
+    axs[1].set(title='%s predict'%title, xlabel='x [pixel]', ylabel = 'y [pixel]')
+    ppp=axs[2].imshow(mean.cpu().detach().numpy(), norm=Enorm)
+    fig.colorbar(ppp,ax=axs[2])
+    ppp=axs[3].imshow(var.cpu().detach().numpy())
+    fig.colorbar(ppp,ax=axs[3])
+    hotness.plot_hot( out_prob, model.range.cpu().detach().numpy(), model.num_bins.cpu().detach().numpy(), axs[4])
+
+
+    E1 = Etarget.flatten()
+    E2 = Eguess.flatten()
+    pch.simple_phase(E1,E2,ax=axs[5], colorbar=False)
+    axs[5].plot( [Emin,Emax],[Emin,Emax],c='k')
+
+def plot_scalars(net_name,train_loader, val_loader, tst_loader, model):
+    def exp(a):
+        out = a
+        if hasattr(model,'predict_log'):
+            if model.predict_log:
+                out = np.exp(a)
+
+    subs = ['test']
+
+    device = 'cuda'
+    for ns,subset in enumerate(subs):
+        ms_net=[]
+        ms_target=[]
+        ma_net=[]
+        ma_target=[]
+        mmin=20
+        mmax=-20
+        this_set = {'train':train_loader, 'valid':val_loader, 'test':tst_loader}[subset]
+        fig,ax=plt.subplots(1,3, figsize=(12,4))
+
+        maxs=0
+        maxa=0
+        plot_ma_line=False
+        counter=0
+        with torch.no_grad():
+            for xb, yb in tqdm.tqdm(this_set):
+
+                import pdb; pdb.set_trace()
+                ms,ma = yb[1][0].cpu()
+                moo = model( xb )
+                if hasattr(model,'predict_image'):
+                    ms_moo,ma_moo = moo[-1][0].cpu()
+                    ms_moo = ms_moo.item()
+                    ma_moo = ma_moo.item()
+                    ms,ma = yb[-1][0].cpu()
+                elif model.n_scalars == 2 and not hasattr(model,'predict_mu_sigma'):
+                    ms_moo, ma_moo = moo[-1].cpu()
+                    ms_moo = ms_moo.item()
+                    ma_moo = ma_moo.item()
+                    ms,ma = yb[-1].cpu()
+
+                elif model.n_scalars == 2 and hasattr(model,'predict_mu_sigma'):
+                    #ms_moo, ma_moo = moo[-1].cpu()
+                    #ms_moo, sigma_moo = moo
+                    ms_moo = moo[0]
+                    ms_moo = ms_moo.cpu()
+                    ms_moo = ms_moo.item()
+                    ma_moo = 0
+                    ms = yb[-1].cpu().item()
+                    ma = ms
+                    plot_ma_line=False
+                else:
+                    ms_moo, ma_moo = moo[-1][0].cpu().item(), 0
+                    ms,ma = yb[0][0].cpu(),0
+
+                ms_net.append(exp(ms_moo))
+                ma_net.append(ma_moo)
+                ms_target.append(exp(ms))
+                ma_target.append(ma)
+
+                #ax[0].scatter(ms, moo[0][0].cpu())
+                #ax[1].scatter(ma, moo[0][1].cpu())
+                maxs=max([maxs,exp(ms)])
+                maxa=max([maxa,ma])
+        if len(ms_target) < 100:
+            for a,b in zip(ms_target,ms_net):
+                ax[0].scatter(a,b)
+            for a,b in zip(ma_target,ma_net):
+                ax[1].scatter(a,b)
+        else:
+            pch.simple_phase(ms_target,ms_net,ax=ax[0])
+            pch.simple_phase(ms_target,1-np.array(ms_net)/np.array(ms_target),ax=ax[1])
+            #pch.simple_phase(ma_target,ma_net,ax=ax[1])
+
+        ax[0].plot( [0,maxs],[0,maxs])
+        if plot_ma_line:
+            ax[1].plot( [0,maxa],[0,maxa])
+        q=1-np.array(ms_net)/np.array(ms_target)
+        ax[2].hist(q)
+        rms = np.sqrt( (q**2).mean())
+        ax[2].set(title='rms error %0.2f'%rms)
+        fig.savefig('%s/plots/%s_scalars_%s'%(os.environ['HOME'],net_name,subset))
+
+def plot_scalar_onlyms(net_name,train_loader, val_loader, tst_loader, model):
+
+    subs = ['test']
+    device = 'cuda'
+    ms_net=[]
+    ms_target=[]
+    for ns,subset in enumerate(subs):
+        mmin=20
+        mmax=-20
+        this_set = {'train':train_loader, 'valid':val_loader, 'test':tst_loader}[subset]
+        fig,ax=plt.subplots(1,1)
+        
+        maxs=0
+        with torch.no_grad():
+            for xb, yb in tqdm.tqdm(this_set):
+                ms = yb[0][0].cpu()
+                moo = model( xb )
+                ms_moo = moo[-1][0].cpu()
+                ms_net.append(ms_moo.item())
+                ms_target.append(ms)
+                maxs=max([maxs,ms])
+        if len(ms_target) < 100:
+            for a,b in zip(ms_target,ms_net):
+                ax.scatter(a,b)
+        else:
+            pch.simple_phase(ms_target,ms_net,ax=ax)
+        pearson_r = pearsonr(ms_target, ms_net)[0]
+        ax.set_title(f'{subset.capitalize()} Set - Pearson R = {pearson_r:.4f}', fontsize=14)
+        ax.plot( [0,maxs],[0,maxs])
+        fig.savefig('%s/plots/%s_scalars_%s'%(os.environ['HOME'],net_name,subset))
+
+    ms_target_np = np.array(ms_target)
+    ms_net_np = np.array(ms_net)
+
+    # Bin by Mach number and compute error
+    bins = [0, 3, 6, 9, 12, 20]
+    for i in range(len(bins)-1):
+        mask = (ms_target_np >= bins[i]) & (ms_target_np < bins[i+1])
+        if mask.sum() > 0:
+            bin_pearson = pearsonr(ms_target_np[mask], ms_net_np[mask])[0]
+            bin_mae = np.abs(ms_target_np[mask] - ms_net_np[mask]).mean()
+            bin_count = mask.sum()
+            print(f"Ms [{bins[i]}-{bins[i+1]}): N={bin_count:4d}, R={bin_pearson:.4f}, MAE={bin_mae:.4f}")
+
+    
+
+def plot_three(Eguess,Etarget,fig=None,axs=None, title='', floating=False, losses={}):
+    print('woo hoo')
+    if hasattr(Eguess, 'cpu'):
+        Eguess=Eguess.cpu()
+    if hasattr(Etarget,'cpu'):
+        Etarget=Etarget.cpu()
+    Emin = min([Etarget.min(), Eguess.min()])
+    Emax = max([Etarget.max(), Eguess.max()])
+    if not floating:
+        #Enorm = mpl.colors.Normalize(vmin=Emin,vmax=Emax)
+        Enorm = mpl.colors.SymLogNorm(1.0,vmin=Emin,vmax=Emax)
+    else:
+        raise
+        Enorm = None
+    ppp=axs[0].imshow(Etarget,norm=Enorm)
+    #fig.colorbar(ppp,ax=axs[0])
+    L1 = Etarget.abs().mean()
+    axs[0].set(title='%s true L1 %0.2e'%(title,L1), xlabel='x [pixel]', ylabel = 'y [pixel]')
+    L1 = losses.get('L1_0',-1)
+    ppp=axs[1].imshow(Eguess,norm=Enorm)
+    #fig.colorbar(ppp,ax=axs[1])
+    axs[1].set(title='%s pred L1err %0.2e'%(title,L1), xlabel='x [pixel]', ylabel = 'y [pixel]')
+    R = pearsonr( Eguess.flatten(), Etarget.flatten())[0]
+    #fig.colorbar(ppp,ax=axs[2])
+    axs[2].set(title='1-R %0.2f err %0.2f'%(1-R, losses.get('Pear',-1)))
+    axs[2].set_aspect('equal')
+    E1 = Etarget.flatten()
+    E2 = Eguess.flatten()
+    pch.simple_phase(E1,E2,ax=axs[2])#, colorbar=False)
+    axs[2].plot( [Emin,Emax],[Emin,Emax],c='k')
+    axs[2].set(xlabel='Actual pixel value',ylabel='Predicted')
+    if len(axs)>=4:
+        #power_guess = torch_power.powerspectrum(Eguess)
+        #power_target = torch_power.powerspectrum(Etarget)
+        power_guess = ps.powerspectrum(Eguess.detach().numpy())
+        power_target = ps.powerspectrum(Etarget.detach().numpy())
+        axs[3].plot( power_guess.kcen, power_guess.avgpower, c='r')
+        axs[3].plot( power_target.kcen, power_target.avgpower, c='k')
+        axs[3].set(xscale='log',yscale='log', title='Power %0.2e'%(losses.get('Power',-1)), xlabel='k', ylabel='power')
+    if len(axs)==5:
+        cross=ps.cross_spectrum(Eguess.detach().numpy(), Etarget.detach().numpy())
+        axs[4].plot(power_target.kcen, power_target.avgpower, c='k')
+        axs[4].plot(cross.kcen, cross.avgpower, c='r')
+        axs[4].set(xscale='log',yscale='log', title='Cross %0.2e'%losses.get('Cross',-1), xlabel='k', ylabel='power')
+
+
+def plot_loss_curve(net_name,model, suffix):
+    plt.clf()
+    plt.plot(model.train_curve.cpu(), label="train")
+    plt.plot(model.val_curve.cpu(),   label="val") 
+    plt.yscale("log")
+    a = model.train_curve.cpu()
+    b = model.val_curve.cpu()
+    minn = min([a[a>0].min(), b[b>0].min(), 1e-2])
+    plt.ylim([minn,10])
+
+
+    plt.legend() 
+    plt.tight_layout()
+    plt.savefig("%s/plots/%s_%s_err_time.png"%(os.environ['HOME'], net_name, suffix))
+
+def plot_all_scalars(net_name,model, all_data, suffix = "", subset = 'test', erronly=True):
+    do_bispectrum=False
+    net = importlib.import_module(f"networks.{net_name}")
+
+    plot_loss_curve(net_name, model, suffix)
+
+    if hasattr(model, "predict_scalars"):
+        ds_train = net.SphericalDataset(all_data['train'].to('cpu'), all_data['quantities']['train'])
+        ds_val   = net.SphericalDataset(all_data['valid'].to('cpu'), all_data['quantities']['valid'])
+        ds_tst   = net.SphericalDataset(all_data['test'].to('cpu'), all_data['quantities']['test'])
+    else:
+        ds_train = net.SphericalDataset(all_data['train'].to('cpu'))
+        ds_val   = net.SphericalDataset(all_data['valid'].to('cpu'))
+        ds_tst   = net.SphericalDataset(all_data['test'].to('cpu'))
+
+    train_loader = DataLoader(ds_train, batch_size=1, shuffle=False, drop_last=False)
+    val_loader   = DataLoader(ds_val,   batch_size=1, shuffle=False, drop_last=False)
+    tst_loader   = DataLoader(ds_tst,   batch_size=1, shuffle=False, drop_last=False)
+                                
+
+    #ds_val = None
+    #ds_tst = None
+    device = 'cuda'
+    model = model.to(device)
+
+    #this_set = ds_val
+    #subset = 'train'
+    if subset == 'test':
+        this_set = tst_loader
+        subs=['test']
+    elif subset == 'train':
+        this_set = train_loader
+        subs=['train']
+    elif subset == 'valid':
+        this_set = val_loader
+        subs = ['valid']
+
+    Nsamples=10
+    print('Subset',subset, 'nsamples',Nsamples)
+    error_list = defaultdict(list)
+    if hasattr( model, 'predict_scalars'):
+        plot_scalars(net_name,train_loader, val_loader, tst_loader,model)
+
+
+def plot1(net_name,model, all_data, suffix = "", subset = 'test', erronly=True):
+    do_bispectrum=False
+    net = importlib.import_module(f"networks.{net_name}")
+
+    plot_loss_curve(net_name, model, suffix)
+
+    ds_train = net.SphericalDataset(all_data['train'].to('cpu'))
+    ds_val   = net.SphericalDataset(all_data['valid'].to('cpu'))
+    ds_tst   = net.SphericalDataset(all_data['test'].to('cpu'))
+
+    train_loader = DataLoader(ds_train, batch_size=1, shuffle=False, drop_last=False)
+    val_loader   = DataLoader(ds_val,   batch_size=1, shuffle=False, drop_last=False)
+    tst_loader   = DataLoader(ds_tst,   batch_size=1, shuffle=False, drop_last=False)
+                                
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = model.to(device)
+
+    if subset == 'test':
+        this_set = tst_loader
+        dataset = ds_tst
+        subs=['test']
+    elif subset == 'train':
+        this_set = train_loader
+        dataset = ds_train
+        subs=['train']
+    elif subset == 'valid':
+        this_set = val_loader
+        dataset = ds_val
+        subs = ['valid']
+
+    Nsamples=10
+    print('Compute losses on %s'%subset)
+    error_list = defaultdict(list)
+    loss_dicts = []
+    sort_by_err=False
+    if 1:
+        sort_by_err=True
+
+        with torch.no_grad():
+            for xb,yb in tqdm.tqdm(this_set):
+                xb = xb.to(device)
+                yb = yb.to(device)
+                moo = model( xb )
+
+                err_dict= model.criterion1(moo,yb)
+                for err in err_dict:
+                    error_list[err].append(err_dict[err].item())
+                error_list['total'].append( sum(err_dict.values()).item())
+                loss_dicts.append(err_dict)
+        fig,ax=plt.subplots(1,1)
+        colors = {'L1_0':'c','L1_1':'m','L1_2':'y','L1_3':'m','L1_4':'m','L1_Multi':'m','Pear':'r','Grad':'g','SSIM':'b','Power':'purple', 'total':'k'}
+        for err in error_list:
+            eee =  error_list[err]
+            x = sorted(eee)
+            y = np.arange(len(x))/len(x)
+            ax.plot(x,y,label=err,color=colors.get(err,'orange'))
+        ax.legend(loc=0)
+        ax.set(xscale='log',xlim=[1e-2,5])
+        fig.savefig('%s/plots/%s_%s_%s_errors.png'%(os.environ['HOME'],net_name,suffix,subset))
+
+
+    sortby = 'total'
+    print("Plot losses sorted by",sortby)
+    for ns,subset in enumerate(subs):
+        mmin=20
+        mmax=-20
+        if sort_by_err:
+            print('sort by %s'%sortby)
+            if subset == 'test':
+                ppp = np.argsort(error_list[sortby])
+                dothese = ppp[::ppp.size//30]
+                #dothese = ppp[:3]
+            elif subset == 'valid':
+                dothese = range(len(this_set))
+            elif subset == 'train':
+                #dothese = range( min([30, len(this_set)]))
+                ppp = np.argsort(error_list[sortby])
+                dothese = list( ppp[::ppp.size//30])
+                #dothese = range(len(this_set))
+                
+                #dothese = ppp[::50]
+                #dothese = [ 939, 627, 448,1107, 543] +list( ppp[::ppp.size//30])
+            #dothese=range(len(this_set))
+        else:
+            dothese = [0,1]
+        print("DO these", dothese)
+        print("Losses: ",sortby)
+        print( np.array(error_list[sortby])[dothese])
+
+        with torch.no_grad():
+            #for n, (xb,yb) in tqdm.tqdm(dothese)
+            for nplot,n in tqdm.tqdm(enumerate(dothese)):
+                xb,yb = dataset[n]
+                xb = xb.to(device).unsqueeze(0)
+                yb = yb.to(device).unsqueeze(0)
+                moo = model( xb)
+                EB_samples=None
+                if hasattr(model, 'flow_head'):
+                    #res_samples = model.flow_head.sample_n(moo[1], n_samples=100)   # [K,B,2,H,W]
+                    #EB_samples = res_samples + model(Tmode.unsqueeze(0).to(net.device), return_features=False)[1]  # add back predicted EB
+                    EB_samples = model.flow_head.sample_n(moo[1], n_samples=Nsamples)
+                else:
+
+                    moo = model( xb)
+                #EB = yb[0][0]
+                EB = yb[0].squeeze(0)
+                EBguess = moo[0][0]
+                this_loss = loss_dicts[n]
+                #this_loss = model.criterion1(moo,yb)
+
+                if 1:
+                    fig,axes=plt.subplots(1,5,figsize=(15,3))
+                    fig.suptitle('Total loss %0.2e'%(sum(this_loss.values())))
+                    ax0=axes
+                    EBguess = torch.nan_to_num(EBguess,nan=0.0)
+                    EB = torch.nan_to_num(EB,nan=0.0)
+                    plot_three(EBguess[0,:,:], EB[:,:],title='H', axs=ax0, fig=fig, losses=this_loss)
+
+                    fig.tight_layout()
+                    outname='%s/plots/%s_%s_%s_%04d.png'%(os.environ['HOME'],net_name,suffix,subset,nplot)
+                    fig.savefig(outname)
+                    plt.close(fig)
+
+    return model
+
