@@ -88,7 +88,7 @@ def dcf_bpos_map(
     q_correction=0.5,
     unit_system="cgs",
     density_is_column=True,
-    sigma_phi_max=np.deg2rad(25.0),
+    sigma_phi_max=np.deg2rad(50),
     min_p=None,
 ):
     """
@@ -242,11 +242,11 @@ def do_it(projected_density, vel_variance, Q_map, U_map, B_target):
             q_stokes=Q_map,
             u_stokes=U_map,
             los_depth=los_depth,
-            window=window,
+            window=128,
             q_correction=q_correction,
             unit_system="cgs",          # or "si"
             density_is_column=True,     # likely true for projected density
-            sigma_phi_max=np.deg2rad(25.0),
+            sigma_phi_max = 300
     )
 
     B_dcf = dcf["B_dcf"]
@@ -254,5 +254,5 @@ def do_it(projected_density, vel_variance, Q_map, U_map, B_target):
 
     metrics = compare_to_target(B_dcf, B_target, mask=valid)
     print(metrics)
-    return B_dcf, valid
+    return dcf
 
