@@ -1,0 +1,92 @@
+{
+  "description": "RADMC-3D run 2 of the mach_grid suite: 13CO(1-0) and 12CO(1-0) from the same snapshot, with the mean H2 density drawn per frame so the dataset spans optically thin to thick gas. Same box length, temperature, grid, views, shifts and labels as run 1 (radmc_13co.json); code velocity 1 = isothermal sound speed at T_K.",
+  "radmc3d_binary": "/home/x-nbisht1/scripts/radmc3d/p79d_observations/radmc3d",
+  "molecules": [
+    {
+      "tag": "13co",
+      "name": "13_co",
+      "file": "/home/x-nbisht1/scripts/radmc3d/p79d_observations/13co_lamda.dat",
+      "abundance": 1.5e-06,
+      "rest_frequency_hz": 110201354279.8,
+      "mass_amu": 29.0
+    },
+    {
+      "tag": "12co",
+      "name": "12_co",
+      "file": "/home/x-nbisht1/scripts/radmc3d/p79d_observations/co.dat",
+      "abundance": 0.0001,
+      "rest_frequency_hz": 115271201800.0,
+      "mass_amu": 28.0
+    }
+  ],
+  "box_length_pc": 4.6,
+  "n_H2_sampling": {
+    "distribution": "loguniform",
+    "min_cm3": 100.0,
+    "max_cm3": 3000.0,
+    "seed": 20261006
+  },
+  "T_K": 10.0,
+  "mu_sound": 2.33,
+  "lines_mode": 1,
+  "ortho_para_ratio": 0.0,
+  "lvg_maxiter": 100,
+  "lvg_convcrit": 0.01,
+  "npix_rt": 256,
+  "target_res": 128,
+  "channel_width_kms": 0.066,
+  "velocity_quantile": 0.9995,
+  "velocity_margin_thermal_sigmas": 4.0,
+  "edge_channels": 6,
+  "ms_max_frame": 22.0,
+  "labels_from": "/home/x-nbisht1/scratch/projects/p79d_dataset/p79d_mach_grid_256_v1.h5",
+  "output_name": "p79d_mach_grid_256_co_v2.h5",
+  "observe": {
+    "fcrao500": {
+      "beam_fwhm_arcsec": 46.0,
+      "distance_pc": 500.0,
+      "channel_width_kms": 0.066,
+      "noise_rms_K": {
+        "13co": 0.2,
+        "12co": 0.25
+      },
+      "mask_sigma": 3.0,
+      "min_channels": 3,
+      "seed": 1
+    },
+    "mwisp": {
+      "beam_fwhm_arcsec": 50.0,
+      "distance_pc": 1000.0,
+      "channel_width_kms": 0.16,
+      "noise_rms_K": {
+        "13co": 0.25,
+        "12co": 0.47
+      },
+      "mask_sigma": 3.0,
+      "min_channels": 3,
+      "seed": 2
+    },
+    "nro_orion": {
+      "beam_fwhm_arcsec": 25.8,
+      "distance_pc": 400.0,
+      "channel_width_kms": 0.5,
+      "noise_rms_K": {
+        "13co": 0.2,
+        "12co": 0.3
+      },
+      "mask_sigma": 3.0,
+      "min_channels": 3,
+      "seed": 3
+    }
+  },
+  "notes": {
+    "n_H2_sampling": "one log-uniform draw per (simulation, frame), shared by its three lines of sight; mean A_V ~ 1.5-45 for the 4.6 pc box (13CO saturates above A_V ~ 5, Pineda et al. 2008)",
+    "abundances": "X(12CO) = 1e-4, 12C/13C ~ 65 -> X(13CO) = 1.5e-6 (run 1 used 1e-6 for 13CO)",
+    "lines_mode": "1 = LTE, 3 = LVG (para/ortho-H2 collision partners from the LAMDA files). Test 2026-10-06 (xi_0.5_mach40 DD0150, Ms 5.6, 8 cores): LTE ~100 s per image at n = 300 and 3000; a single LVG image did not finish in ~85 min (1.5 h job limit) -> LTE for the full run",
+    "ortho_para_ratio": "o-H2 / p-H2; 0 for cold (10 K) gas",
+    "ms_max_frame": "frames with Ms above this are skipped (training uses Ms <= 20; these were the slowest frames in run 1)",
+    "labels_from": "3D labels are copied from the projected dataset (identical frames) instead of being recomputed",
+    "observe": "survey-like re-observations made from the stored noise-free cubes: beam, distance (beam size in pixels), channel width (cubes are rebinned), per-line noise. MWISP noise from DR1 (0.25 K 13CO, 0.47 K 12CO); MWISP distance is a placeholder",
+    "molecule files": "co.dat is the LAMDA 12CO file; 13co_lamda.dat is the LAMDA 13C16O file"
+  }
+}
