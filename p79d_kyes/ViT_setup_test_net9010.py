@@ -51,15 +51,21 @@ p.add_argument("--no_plots", action="store_true", help="skip the diagnostic plot
 p.add_argument("--workers", type=int, default=8, help="DataLoader workers for training")
 p.add_argument("--model_dir", default="/home/x-nbisht1/projects/p79d_dataset/models")
 p.add_argument("--data_file", default=net.data_file, help="dataset HDF5 (projected or 13CO)")
-p.add_argument("--image_key", default="images", choices=["images", "images_obs"],
-               help="images_obs: the 13CO dataset's noisy, masked observation-pipeline maps")
+p.add_argument("--image_key", default="images",
+               help="images | images_obs (13CO run 1) | images_obs_13co, images_obs_12co (run 2); "
+                    "join with '+' to stack lines, e.g. images_obs_13co+images_obs_12co")
+p.add_argument("--time_budget_h", type=float, default=None,
+               help="stop training before this many hours (keeps the best weights), so the job "
+                    "can be given a tight SLURM limit and still finish its evaluation")
 p.add_argument("--tag", default="", help="label added to every output name, e.g. 13co")
 args = p.parse_args()
 
 # Module-level switches are read at call time: set them before building anything.
 net.n_input_channels = 1 if args.mode == "mom0" else 3
 net.input_mode       = args.mode
-net.n_model_channels = net.n_input_channels + 1
+net.n_lines          = len(args.image_key.split("+"))
+net.n_model_channels = net.n_lines * net.n_input_channels + 1
+net.time_budget_h    = args.time_budget_h
 net.chi_field, net.chi_space = args.chi_field, args.chi_space
 net.CHI_LABEL = r"$\chi_v$" if args.chi_field == "chi_v" else r"$\chi_w$"
 net.epochs = args.epochs
@@ -77,9 +83,12 @@ ckpt_path = os.path.join(args.model_dir, f"test{net.idd}{tag_}_{net.input_mode}_
 # beam FWHM for the 13CO mocks (used to set the resolution channel on real data)
 import h5py
 with h5py.File(net.data_file, "r") as _f:
-    _rt = json.loads(_f.attrs["rt_json"]) if "rt_json" in _f.attrs else None
-native_beam_pix = 1.0 if _rt is None else _rt["beam_fwhm_arcsec"] / (
-    _rt["box_length_pc"] / _rt["target_res"] / _rt["distance_pc"] * 206265.0)
+    _rt  = json.loads(_f.attrs["rt_json"]) if "rt_json" in _f.attrs else None
+    # run-2 re-observed files carry their setup (beam, distance) in observe_version
+    _obs = json.loads(_f.attrs["observe_version"]) if "observe_version" in _f.attrs else None
+_beam = _obs if _obs is not None else (_rt if _rt and "beam_fwhm_arcsec" in _rt else None)
+native_beam_pix = 1.0 if _beam is None else _beam["beam_fwhm_arcsec"] / (
+    _rt["box_length_pc"] / _rt["target_res"] / _beam["distance_pc"] * 206265.0)
 print(f"{net_name} | fold {args.fold}/{args.n_folds} | target {net.chi_field} ({net.chi_space}) | "
       f"device {net.device} | threads {torch.get_num_threads()}", flush=True)
 
@@ -135,7 +144,8 @@ print("  chi: " + "  ".join(f"q{int(a*100)}={q:.3f}" for a, q in q_chi.items()))
 print(f"  temperatures: T_ms={model.log_temp_ms.exp().item():.3f}  T_chi={model.log_temp_chi.exp().item():.3f}")
 with open(os.path.join(args.model_dir, f"conformal_quantiles_{net.idd}{tag_}_{net.input_mode}_fold{args.fold}.json"), "w") as f:
     json.dump({"fold": args.fold, "chi_field": net.chi_field, "chi_space": net.chi_space,
-               "data_file": net.data_file, "image_key": net.image_key, "native_beam_pix": native_beam_pix,
+               "data_file": net.data_file, "image_key": net.image_key, "n_lines": net.n_lines,
+               "native_beam_pix": native_beam_pix,
                "ms_ln": {str(a): q for a, q in q_ms.items()},
                "chi_target": {str(a): q for a, q in q_chi.items()}}, f, indent=2)
 
@@ -149,7 +159,7 @@ if not args.no_plots:
     # three fixed examples (low / mid / high Ms) so the files are overwritten, not accumulated
     order = np.argsort(splits["calib"]["Ms_act"])
     for j, i in enumerate(order[[len(order) // 10, len(order) // 2, (9 * len(order)) // 10]]):
-        x = splits["calib"]["data"][i:i + 1, :net.n_input_channels].to(net.device)
+        x = splits["calib"]["data"][i:i + 1, net.input_channel_index()].to(net.device)
         net.plot_resolution_robustness_dual(model, x, float(splits["calib"]["Ms_act"][i]),
                                             float(splits["calib"]["chi_act"][i]), tag=f"calib_{j}")
 
@@ -191,6 +201,7 @@ test = splits["test"]
 np.savez(os.path.join(args.model_dir, f"{run_name}_test.npz"),
          fold=args.fold, sim_id=test["sim_id"], frame=test["frame"], los=test["los"],
          xi_forcing=test["xi_forcing"], Ms_mean=test["Ms_mean"], sim_names=splits["sim_names"],
+         n_H2=test["n_H2"], AV_median=test["AV_median"],
          **pt, **{k: v for k, v in ci.items() if k.rsplit("_", 1)[-1][:2] in ("lo", "hi")})
 with open(os.path.join(args.model_dir, f"{run_name}_test.json"), "w") as f:
     json.dump({"fold": args.fold, "chi_field": net.chi_field, "chi_space": net.chi_space,

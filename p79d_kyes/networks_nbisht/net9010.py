@@ -33,9 +33,10 @@ import h5py
 idd  = 9010
 
 # ─── Input mode ──────────────────────────────────────────────────────────────
-n_input_channels = 3                              # 1 or 3
+n_input_channels = 3                              # moments per line: 1 or 3
+n_lines          = 1                              # tracers stacked as input (run 2: 13CO+12CO = 2)
 input_mode       = "allmom" if n_input_channels == 3 else "mom0"
-n_model_channels = n_input_channels + 1           # +1 for resolution channel
+n_model_channels = n_lines * n_input_channels + 1 # +1 for resolution channel
 
 what = (f"Hybrid CNN-ViT | dual-output Ms+chi | {input_mode} | "
         f"resolution-aware | temperature-scaled conformal | MC-dropout")
@@ -50,6 +51,9 @@ ms_max    = 20.0        # drop images with Ms above this (sparse, under-resolved
 # observation-pipeline maps, converted to training units and filled exactly as
 # predict_observations_net9010.py fills real tiles (fill_masked_moments).
 image_key = "images"
+# Run-2 datasets store one map set per line: images_obs_13co, images_obs_12co
+# (with mask_obs_<line>). Join keys with "+" to stack lines as input channels,
+# e.g. "images_obs_13co+images_obs_12co" (set n_lines to match).
 # Short label added to every output name (e.g. "13co") so runs on different
 # datasets do not overwrite each other; "" for the projected dataset.
 run_tag   = ""
@@ -75,6 +79,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ─── Training hyperparameters ─────────────────────────────────────────────────
 epochs       = 100
+time_budget_h = None    # stop training (keeping the best weights) before this many hours
 lr           = 5e-4
 batch_size   = 512
 weight_decay = 0.01
@@ -106,10 +111,15 @@ def _read_dataset():
     """Images [N, 3, H, W] (float tensor) and a dict of per-sample metadata."""
     print(f"Reading {data_file} [{image_key}] …")
     with h5py.File(data_file, "r") as f:
-        if image_key == "images_obs":
-            data = obs_to_training_units(f["images_obs"][:], f["mask_obs"][:], float(f.attrs["sound_speed_kms"]))
-        else:
-            data = torch.from_numpy(f[image_key][:]).float()
+        parts = []
+        for key in image_key.split("+"):
+            if key.startswith("images_obs"):
+                parts.append(obs_to_training_units(f[key][:], f[key.replace("images_obs", "mask_obs")][:],
+                                                   float(f.attrs["sound_speed_kms"])))
+            else:
+                parts.append(torch.from_numpy(f[key][:]).float())
+        data = torch.cat(parts, dim=1)                        # [N, 3 * n_lines, H, W]
+        n_img = len(data)
         meta = {
             "Ms_act":  f["labels/Ms"][:],
             "chi_act": f[f"labels/{chi_field}"][:],
@@ -118,6 +128,9 @@ def _read_dataset():
             "frame":   f["samples/frame"][:],
             "los":     f["samples/los"][:],
             "time":    f["labels/time"][:],
+            # run-2 opacity labels (NaN for datasets without them)
+            "n_H2":      f["labels/n_H2"][:] if "labels/n_H2" in f else np.full(n_img, np.nan),
+            "AV_median": f["rt/AV_median"][:] if "rt/AV_median" in f else np.full(n_img, np.nan),
         }
         sim_names   = f["sims/name"][:].astype(str)
         sim_xi      = f["sims/xi"][:]
@@ -300,6 +313,18 @@ def chi_from_target(t, sig_t=None):
     return chi if sig_t is None else (chi, chi * (1 - chi) * sig_t)
 
 
+def input_channel_index():
+    """Stored channels fed to the network: the first n_input_channels of each line's 3 moments."""
+    return [3 * l + c for l in range(n_lines) for c in range(n_input_channels)]
+
+
+def preprocess_lines(x: torch.Tensor) -> torch.Tensor:
+    """preprocess_maps applied to each line's block of n_input_channels maps."""
+    if n_lines == 1:
+        return preprocess_maps(x)
+    return torch.cat([preprocess_maps(b) for b in x.split(n_input_channels, dim=-3)], dim=-3)
+
+
 def preprocess_maps(x: torch.Tensor, mode: str = None) -> torch.Tensor:
     """
     Map-level input transform, shared with the observation pipeline so real
@@ -346,7 +371,7 @@ class MachChiDataset(Dataset):
         return self.data.size(0)
 
     def __getitem__(self, idx):
-        x = self.data[idx][:n_input_channels].clone()   # [C, H, W]
+        x = self.data[idx][input_channel_index()].clone()   # [n_lines * C, H, W]
         res_factor = 1.0
 
         if self.augment:
@@ -360,7 +385,7 @@ class MachChiDataset(Dataset):
                 res_factor = res_min_factor + (1.0 - res_min_factor) * torch.rand(1).item()
                 x = _degrade_resolution(x, res_factor)
 
-        x = preprocess_maps(x)
+        x = preprocess_lines(x)
         res_ch = torch.full((1, x.shape[-2], x.shape[-1]),
                             fill_value=res_factor, dtype=x.dtype)
         x = torch.cat([x, res_ch], dim=0)   # [n_model_channels, H, W]
@@ -670,6 +695,9 @@ def trainer(model, splits, epochs=100, batch_size=64, lr=5e-4,
         if bad_epochs >= patience:
             print(f"\n[Early Stopping] Validation loss did not improve for {patience} epochs.")
             break
+        if time_budget_h and (now - t0) * (epoch + 1) / epoch > time_budget_h * 3600:
+            print(f"\n[Time budget] Another epoch would pass {time_budget_h:.2f} h; stopping at epoch {epoch}.")
+            break
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -946,7 +974,7 @@ def plot_uncertainty_analysis_dual(model, test_loader, tag="test"):
 def plot_resolution_robustness_dual(model, sample_x, true_ms, true_chi, tag=""):
     """
     Prediction and sigma vs resolution factor for one image.
-    sample_x : [1, n_input_channels, H, W] raw (physical) maps, no res channel.
+    sample_x : [1, n_lines * n_input_channels, H, W] raw (physical) maps, no res channel.
     Degradation happens on the physical maps, then preprocess_maps, exactly as
     in MachChiDataset.
     """
@@ -959,7 +987,7 @@ def plot_resolution_robustness_dual(model, sample_x, true_ms, true_chi, tag=""):
             x = sample_x.clone()
             if f < 1.0:
                 x = _degrade_resolution(x, f)
-            x = preprocess_maps(x)
+            x = preprocess_lines(x)
             res_ch = torch.full((1, 1, x.shape[-2], x.shape[-1]), f, dtype=x.dtype, device=x.device)
             (mu_ms, lv_ms), (mu_c, lv_c) = model(torch.cat([x, res_ch], dim=1).to(device))
             ms_val = float(np.exp(mu_ms.item()))
