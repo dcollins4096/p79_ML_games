@@ -91,7 +91,7 @@ def plan_run2():
                 "name": f"{tag}_f{fold}", "group": tag, "fold": fold,
                 "args": f"--mode allmom --fold {fold} --data_file {f} --image_key {key} --tag {tag}",
                 "outputs": [out],
-                "mem_gb": mem, "time_h": 9.0,   # first guess; refined from finished jobs
+                "mem_gb": mem, "time_h": 9.0, "time_h0": 9.0,   # first guess; refined from finished jobs
                 "state": "queued", "attempts": [],
             })
     return {"name": "run2", "max_submitted": 4, "max_running": 2, "max_retries": 2,
@@ -149,7 +149,9 @@ def resize(state):
             continue
         t = max(j["attempts"][-1]["elapsed_h"] for j in done)
         m = max(j["attempts"][-1]["maxrss_gb"] for j in done)
-        job["time_h"] = round(min(14.0, max(3.0, 1.25 * t + 0.25)), 2)
+        # never below the planned limit: a fast first job must not cut later ones short
+        # (training stops on its time budget before early stopping otherwise)
+        job["time_h"] = round(min(14.0, max(job.get("time_h0", 9.0), 1.25 * t + 0.25)), 2)
         job["mem_gb"] = int(min(900, max(48, math.ceil(1.3 * m / 8) * 8)))
 
 
