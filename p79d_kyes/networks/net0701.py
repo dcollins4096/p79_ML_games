@@ -456,7 +456,6 @@ def gradient_loss(pred, target):
     return loss_x + loss_y
 
 
-   
 def pearson_loss(pred, target, eps=1e-8):
     """
     pred, target: [B, 1, H, W]

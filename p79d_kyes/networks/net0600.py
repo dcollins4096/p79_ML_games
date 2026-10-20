@@ -21,7 +21,7 @@ import torch_power
 
 
 idd = 600
-what = "180 repeate and horse around"
+what = "184 repeate and horse around"
 
 #fname_train = "p79d_subsets_S256_N5_xyz_down_12823456_first.h5"
 #fname_valid = "p79d_subsets_S256_N5_xyz_down_12823456_second.h5"
